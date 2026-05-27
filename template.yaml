@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  CloudSentinel - Enterprise IaC Security Governance Platform
+  Automated S3 bucket security scanning with Step Functions orchestration
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+
+Resources:
+  #############################################
+  # DynamoDB Table - Findings Storage
+  #############################################
+  SecurityAuditsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: SecurityAudits
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: auditId
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: auditId
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+
+  #############################################
+  # SQS Dead Letter Queue - Error Handling
+  #############################################
+  AuditDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: AuditDlq
+      MessageRetentionPeriod: 1209600
+
+  #############################################
+  # SNS Topic - Security Alerts
+  #############################################
+  SecurityAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: SecurityAlerts
+      DisplayName: CloudSentinel Security Alerts
+
+  #############################################
+  # Secrets Manager - Webhook Configuration
+  #############################################
+  CloudSentinelSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: CloudSentinel/Config
+      Description: CloudSentinel configuration including webhook URLs
+      SecretString: !Sub |
+        {
+          "webhook_url": "https://hooks.slack.com/services/PLACEHOLDER",
+          "environment": "production"
+        }
+
+  #############################################
+  # Auditor Lambda Function (.NET 8)
+  #############################################
+  AuditorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: CloudSentinel-Auditor
+      Description: Scans S3 buckets for public access misconfigurations
+      CodeUri: ./auditor/
+      Handler: Auditor::Auditor.Function::FunctionHandler
+      Runtime: dotnet8
+      Architectures:
+        - x86_64
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt AuditDeadLetterQueue.Arn
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:ListAllMyBuckets
+                - s3:GetBucketPublicAccessBlock
+                - s3:GetBucketLocation
+              Resource: '*'
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt AuditDeadLetterQueue.QueueName
+
+  #############################################
+  # Reporter Lambda Function (Python/Flask)
+  #############################################
+  ReporterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: CloudSentinel-Reporter
+      Description: Ingests findings and serves the audit dashboard
+      CodeUri: ./reporter/
+      Handler: app.handler
+      Runtime: python3.11
+      Architectures:
+        - x86_64
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref SecurityAuditsTable
+          SECRET_NAME: CloudSentinel/Config
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SecurityAuditsTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref CloudSentinelSecret
+      Events:
+        Dashboard:
+          Type: Api
+          Properties:
+            Path: /
+            Method: get
+        Ingest:
+          Type: Api
+          Properties:
+            Path: /ingest
+            Method: post
+
+  #############################################
+  # Step Functions State Machine
+  #############################################
+  AuditStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: CloudSentinel-AuditWorkflow
+      DefinitionUri: statemachine/audit-workflow.asl.json
+      DefinitionSubstitutions:
+        AuditorFunctionArn: !GetAtt AuditorFunction.Arn
+        ReporterFunctionArn: !GetAtt ReporterFunction.Arn
+        SecurityAlertsTopicArn: !Ref SecurityAlertsTopic
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AuditorFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ReporterFunction
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt SecurityAlertsTopic.TopicName
+
+  #############################################
+  # EventBridge Rule - 24 Hour Schedule
+  #############################################
+  DailyAuditSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: CloudSentinel-DailyAudit
+      Description: Triggers security audit every 24 hours
+      ScheduleExpression: rate(24 hours)
+      State: ENABLED
+      Targets:
+        - Id: AuditStateMachineTarget
+          Arn: !GetAtt AuditStateMachine.Arn
+          RoleArn: !GetAtt EventBridgeRole.Arn
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CloudSentinel-EventBridge-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeStateMachine
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !GetAtt AuditStateMachine.Arn
+
+Outputs:
+  DashboardUrl:
+    Description: URL for the CloudSentinel Dashboard
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+
+  StateMachineArn:
+    Description: ARN of the Audit Workflow State Machine
+    Value: !GetAtt AuditStateMachine.Arn
+
+  AuditorFunctionArn:
+    Description: ARN of the Auditor Lambda Function
+    Value: !GetAtt AuditorFunction.Arn
+
+  ReporterFunctionArn:
+    Description: ARN of the Reporter Lambda Function
+    Value: !GetAtt ReporterFunction.Arn
