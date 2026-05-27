@@ -1,0 +1,30 @@
+# Claude
+.claude/
+
+# Environment
+.env
+*.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Build
+bin/
+obj/
+publish/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+
+# OS
+.DS_Store
+Thumbs.db
