@@ -1,0 +1,85 @@
+{
+  "Comment": "CloudSentinel Audit Workflow - Orchestrates security scanning pipeline",
+  "StartAt": "RunAuditor",
+  "States": {
+    "RunAuditor": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${AuditorFunctionArn}",
+        "Payload.$": "$"
+      },
+      "ResultPath": "$.auditResult",
+      "ResultSelector": {
+        "vulnerabilitiesFound.$": "$.Payload.vulnerabilitiesFound",
+        "atRiskBuckets.$": "$.Payload.atRiskBuckets",
+        "totalBucketsScanned.$": "$.Payload.totalBucketsScanned",
+        "auditTimestamp.$": "$.Payload.auditTimestamp"
+      },
+      "Next": "CheckVulnerabilities",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "AuditFailed",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "CheckVulnerabilities": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.auditResult.vulnerabilitiesFound",
+          "BooleanEquals": true,
+          "Next": "ProcessFindings"
+        }
+      ],
+      "Default": "AuditComplete"
+    },
+    "ProcessFindings": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ReporterFunctionArn}",
+        "Payload": {
+          "httpMethod": "POST",
+          "path": "/ingest",
+          "body.$": "States.JsonToString($.auditResult)"
+        }
+      },
+      "ResultPath": "$.reporterResult",
+      "Next": "SendAlert",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "ReportingFailed",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "SendAlert": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${SecurityAlertsTopicArn}",
+        "Subject": "CloudSentinel Alert: Security Vulnerabilities Detected",
+        "Message.$": "States.Format('ALERT: {} S3 bucket(s) with public access misconfiguration detected. Buckets at risk: {}', States.ArrayLength($.auditResult.atRiskBuckets), States.JsonToString($.auditResult.atRiskBuckets))"
+      },
+      "Next": "AuditComplete"
+    },
+    "AuditComplete": {
+      "Type": "Succeed",
+      "Comment": "Audit completed successfully"
+    },
+    "AuditFailed": {
+      "Type": "Fail",
+      "Error": "AuditError",
+      "Cause": "The Auditor function encountered an error"
+    },
+    "ReportingFailed": {
+      "Type": "Fail",
+      "Error": "ReportingError",
+      "Cause": "The Reporter function encountered an error"
+    }
+  }
+}
