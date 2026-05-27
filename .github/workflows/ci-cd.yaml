@@ -1,0 +1,279 @@
+name: CloudSentinel CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  release:
+    types: [published]
+
+env:
+  REGISTRY: ghcr.io
+  AUDITOR_IMAGE: cloudsentinel/auditor
+  REPORTER_IMAGE: cloudsentinel/reporter
+
+jobs:
+  ###########################################
+  # Code Quality & Security Scanning
+  ###########################################
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov (IaC Security)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+
+      - name: Run tfsec (Terraform Security)
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          working_directory: terraform/
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+
+  ###########################################
+  # Build & Test Auditor (.NET 8)
+  ###########################################
+  build-auditor:
+    name: Build Auditor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore auditor/Auditor.csproj
+
+      - name: Build
+        run: dotnet build auditor/Auditor.csproj --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test auditor/Auditor.csproj --no-build --verbosity normal
+
+      - name: Publish
+        run: dotnet publish auditor/Auditor.csproj -c Release -o ./publish
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: auditor-build
+          path: ./publish
+
+  ###########################################
+  # Build & Test Reporter (Python)
+  ###########################################
+  build-reporter:
+    name: Build Reporter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r reporter/requirements.txt
+          pip install pytest pytest-cov flake8 black
+
+      - name: Lint with flake8
+        run: flake8 reporter/ --count --select=E9,F63,F7,F82 --show-source --statistics
+
+      - name: Format check with Black
+        run: black --check reporter/
+
+      - name: Test with pytest
+        run: pytest reporter/ --cov=reporter --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+
+  ###########################################
+  # Build Docker Images
+  ###########################################
+  build-docker:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [build-auditor, build-reporter]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (Auditor)
+        id: meta-auditor
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.AUDITOR_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
+
+      - name: Build & Push Auditor
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.auditor
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-auditor.outputs.tags }}
+          labels: ${{ steps.meta-auditor.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Extract metadata (Reporter)
+        id: meta-reporter
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.REPORTER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
+
+      - name: Build & Push Reporter
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.reporter
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-reporter.outputs.tags }}
+          labels: ${{ steps.meta-reporter.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  ###########################################
+  # Container Security Scanning
+  ###########################################
+  security-scan:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+    needs: [build-docker]
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner (Auditor)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.AUDITOR_IMAGE }}:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-auditor.sarif'
+
+      - name: Run Trivy vulnerability scanner (Reporter)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.REPORTER_IMAGE }}:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-reporter.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-auditor.sarif'
+
+  ###########################################
+  # Deploy to Kubernetes
+  ###########################################
+  deploy:
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+    needs: [build-docker, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.13.0'
+
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      - name: Deploy with Helm
+        run: |
+          helm upgrade --install cloudsentinel ./helm/cloudsentinel \
+            --namespace cloudsentinel \
+            --create-namespace \
+            --set auditor.image.tag=${{ github.sha }} \
+            --set reporter.image.tag=${{ github.sha }} \
+            --set secrets.awsAccessKeyId=${{ secrets.AWS_ACCESS_KEY_ID }} \
+            --set secrets.awsSecretAccessKey=${{ secrets.AWS_SECRET_ACCESS_KEY }} \
+            --wait --timeout 5m
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/cloudsentinel-auditor -n cloudsentinel
+          kubectl rollout status deployment/cloudsentinel-reporter -n cloudsentinel
+
+  ###########################################
+  # Terraform Plan/Apply
+  ###########################################
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    needs: [code-quality]
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply -auto-approve tfplan
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
