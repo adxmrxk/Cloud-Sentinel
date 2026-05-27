@@ -1,0 +1,158 @@
+# CloudSentinel Helm Values
+
+global:
+  environment: production
+  imageRegistry: ""
+  imagePullSecrets: []
+
+# Auditor Configuration
+auditor:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: cloudsentinel/auditor
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+  env:
+    CLOUD_PROVIDER: "multi"
+    LOG_LEVEL: "INFO"
+
+# Reporter Configuration
+reporter:
+  enabled: true
+  replicaCount: 3
+  image:
+    repository: cloudsentinel/reporter
+    tag: latest
+    pullPolicy: Always
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  env:
+    FLASK_ENV: "production"
+    LOG_LEVEL: "INFO"
+
+# Ingress Configuration
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: cloudsentinel.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: reporter
+  tls:
+    - secretName: cloudsentinel-tls
+      hosts:
+        - cloudsentinel.example.com
+
+# Redis Configuration
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    persistence:
+      size: 1Gi
+
+# Grafana Configuration
+grafana:
+  enabled: true
+  adminPassword: cloudsentinel
+  persistence:
+    enabled: true
+    size: 1Gi
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: 'default'
+          folder: 'CloudSentinel'
+          type: file
+          options:
+            path: /var/lib/grafana/dashboards/default
+
+# Prometheus Configuration
+prometheus:
+  enabled: true
+  server:
+    persistentVolume:
+      size: 8Gi
+
+# CronJob for scheduled audits
+cronjob:
+  enabled: true
+  schedule: "0 0 * * *"  # Daily at midnight
+  concurrencyPolicy: Forbid
+
+# Cloud Provider Configuration
+cloudProviders:
+  aws:
+    enabled: true
+    region: us-east-1
+  azure:
+    enabled: false
+    subscriptionId: ""
+  gcp:
+    enabled: false
+    projectId: ""
+
+# Secrets (use external secrets in production)
+secrets:
+  create: true
+  awsAccessKeyId: ""
+  awsSecretAccessKey: ""
+  slackWebhookUrl: ""
+
+# Service Account
+serviceAccount:
+  create: true
+  name: cloudsentinel-sa
+  annotations: {}
+
+# Pod Security
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Node Selection
+nodeSelector: {}
+tolerations: []
+affinity: {}
