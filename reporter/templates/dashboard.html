@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CloudSentinel - Security Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e4e4e4;
+        }
+        .container { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid #334155;
+        }
+        h1 {
+            font-size: 2rem;
+            background: linear-gradient(90deg, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .subtitle { color: #64748b; font-size: 0.875rem; }
+        .badge {
+            padding: 0.5rem 1rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            display: inline-block;
+        }
+        .badge-critical { background: #dc2626; color: white; }
+        .badge-high { background: #ea580c; color: white; }
+        .badge-medium { background: #ca8a04; color: white; }
+        .badge-low { background: #16a34a; color: white; }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid #334155;
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            text-align: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+        }
+        .stat-value { font-size: 2.5rem; font-weight: bold; color: #60a5fa; }
+        .stat-label { color: #94a3b8; margin-top: 0.5rem; }
+        .table-container {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid #334155;
+            border-radius: 0.75rem;
+            overflow: hidden;
+        }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 1rem; text-align: left; border-bottom: 1px solid #334155; }
+        th {
+            background: rgba(255, 255, 255, 0.05);
+            color: #94a3b8;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+        }
+        tr:hover { background: rgba(255, 255, 255, 0.03); }
+        tr:last-child td { border-bottom: none; }
+        .risk-factors { font-size: 0.75rem; color: #94a3b8; }
+        .risk-factors strong { color: #f87171; }
+        .empty-state {
+            text-align: center;
+            padding: 4rem;
+            color: #64748b;
+        }
+        .empty-state h2 { margin-bottom: 0.5rem; color: #94a3b8; }
+        .timestamp { font-family: 'Monaco', 'Consolas', monospace; font-size: 0.875rem; color: #64748b; }
+        .audit-id { font-family: 'Monaco', 'Consolas', monospace; color: #60a5fa; }
+        .severity-critical { color: #f87171; font-weight: 600; }
+        .severity-high { color: #fb923c; font-weight: 600; }
+        .severity-medium { color: #fbbf24; font-weight: 600; }
+        .severity-low { color: #4ade80; font-weight: 600; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <h1>CloudSentinel Dashboard</h1>
+                <p class="subtitle">S3 Bucket Security Governance Platform</p>
+            </div>
+            <span class="timestamp">
+                {% if audits %}
+                    Last scan: {{ audits[0].timestamp }}
+                {% else %}
+                    No scans yet
+                {% endif %}
+            </span>
+        </header>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value">{{ audits | length }}</div>
+                <div class="stat-label">Total Audits</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">
+                    {% set total_buckets = namespace(count=0) %}
+                    {% for audit in audits %}
+                        {% set total_buckets.count = total_buckets.count + (audit.totalBucketsScanned | default(0) | int) %}
+                    {% endfor %}
+                    {{ total_buckets.count }}
+                </div>
+                <div class="stat-label">Buckets Scanned</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">
+                    {% set total_findings = namespace(count=0) %}
+                    {% for audit in audits %}
+                        {% set total_findings.count = total_findings.count + (audit.atRiskBuckets | default([]) | length) %}
+                    {% endfor %}
+                    {{ total_findings.count }}
+                </div>
+                <div class="stat-label">Total Findings</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">
+                    {% set vuln_audits = namespace(count=0) %}
+                    {% for audit in audits %}
+                        {% if audit.vulnerabilitiesFound %}
+                            {% set vuln_audits.count = vuln_audits.count + 1 %}
+                        {% endif %}
+                    {% endfor %}
+                    {{ vuln_audits.count }}
+                </div>
+                <div class="stat-label">Audits with Issues</div>
+            </div>
+        </div>
+
+        {% if audits %}
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Audit ID</th>
+                        <th>Timestamp</th>
+                        <th>Buckets Scanned</th>
+                        <th>At Risk</th>
+                        <th>Status</th>
+                        <th>Risk Details</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for audit in audits %}
+                    <tr>
+                        <td><span class="audit-id">{{ audit.auditId[:8] }}...</span></td>
+                        <td class="timestamp">{{ audit.timestamp }}</td>
+                        <td>{{ audit.totalBucketsScanned | default(0) }}</td>
+                        <td>
+                            {% set risk_count = audit.atRiskBuckets | default([]) | length %}
+                            {% if risk_count > 0 %}
+                                <span class="badge badge-critical">{{ risk_count }} bucket{% if risk_count > 1 %}s{% endif %}</span>
+                            {% else %}
+                                <span class="badge badge-low">Clean</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ audit.status | default('PROCESSED') }}</td>
+                        <td class="risk-factors">
+                            {% for bucket in audit.atRiskBuckets[:3] %}
+                                <strong>{{ bucket.BucketName }}</strong>:
+                                <span class="severity-{{ bucket.Severity | lower }}">{{ bucket.Severity }}</span><br>
+                            {% endfor %}
+                            {% if audit.atRiskBuckets | length > 3 %}
+                                <em>+{{ audit.atRiskBuckets | length - 3 }} more...</em>
+                            {% endif %}
+                            {% if audit.atRiskBuckets | length == 0 %}
+                                <span style="color: #4ade80;">All buckets secure</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <h2>No Audits Yet</h2>
+            <p>Run the Step Function workflow to perform your first security audit.</p>
+            <p style="margin-top: 1rem; font-size: 0.875rem;">
+                Use: <code style="background: #334155; padding: 0.25rem 0.5rem; border-radius: 4px;">aws stepfunctions start-execution --state-machine-arn YOUR_ARN</code>
+            </p>
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>
