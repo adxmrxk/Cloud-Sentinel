@@ -1,0 +1,214 @@
+#############################################
+# CloudSentinel - Docker Compose
+# Local Development Environment
+#############################################
+
+version: '3.9'
+
+services:
+  ###########################################
+  # Auditor Service (.NET 8)
+  ###########################################
+  auditor:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.auditor
+    container_name: cloudsentinel-auditor
+    environment:
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - CLOUD_PROVIDER=aws
+    ports:
+      - "8081:8080"
+    networks:
+      - cloudsentinel-network
+    depends_on:
+      - dynamodb-local
+      - redis
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  ###########################################
+  # Reporter Service (Flask/Python)
+  ###########################################
+  reporter:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.reporter
+    container_name: cloudsentinel-reporter
+    environment:
+      - FLASK_ENV=development
+      - TABLE_NAME=SecurityAudits
+      - SECRET_NAME=CloudSentinel/Config
+      - AWS_REGION=us-east-1
+      - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
+      - REDIS_URL=redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./reporter:/app:ro
+    networks:
+      - cloudsentinel-network
+    depends_on:
+      - dynamodb-local
+      - redis
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  ###########################################
+  # DynamoDB Local
+  ###########################################
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: cloudsentinel-dynamodb
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath /data"
+    ports:
+      - "8082:8000"
+    volumes:
+      - dynamodb-data:/data
+    networks:
+      - cloudsentinel-network
+    restart: unless-stopped
+
+  ###########################################
+  # Redis Cache
+  ###########################################
+  redis:
+    image: redis:7-alpine
+    container_name: cloudsentinel-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - cloudsentinel-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ###########################################
+  # PostgreSQL (Alternative to DynamoDB)
+  ###########################################
+  postgres:
+    image: postgres:15-alpine
+    container_name: cloudsentinel-postgres
+    environment:
+      - POSTGRES_USER=cloudsentinel
+      - POSTGRES_PASSWORD=cloudsentinel_secret
+      - POSTGRES_DB=cloudsentinel
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - cloudsentinel-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudsentinel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  ###########################################
+  # Grafana (Monitoring Dashboard)
+  ###########################################
+  grafana:
+    image: grafana/grafana:latest
+    container_name: cloudsentinel-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=cloudsentinel
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - cloudsentinel-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  ###########################################
+  # Prometheus (Metrics Collection)
+  ###########################################
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: cloudsentinel-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - cloudsentinel-network
+    restart: unless-stopped
+
+  ###########################################
+  # Jaeger (Distributed Tracing)
+  ###########################################
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: cloudsentinel-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    networks:
+      - cloudsentinel-network
+    restart: unless-stopped
+
+  ###########################################
+  # NGINX Reverse Proxy
+  ###########################################
+  nginx:
+    image: nginx:alpine
+    container_name: cloudsentinel-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - cloudsentinel-network
+    depends_on:
+      - reporter
+      - grafana
+    restart: unless-stopped
+
+###########################################
+# Networks
+###########################################
+networks:
+  cloudsentinel-network:
+    driver: bridge
+    name: cloudsentinel-network
+
+###########################################
+# Volumes
+###########################################
+volumes:
+  dynamodb-data:
+  redis-data:
+  postgres-data:
+  grafana-data:
+  prometheus-data:

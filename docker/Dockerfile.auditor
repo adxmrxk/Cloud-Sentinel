@@ -1,0 +1,45 @@
+#############################################
+# CloudSentinel Auditor - Multi-stage Docker Build
+# .NET 8 Lambda Function Container
+#############################################
+
+# Build stage
+FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS build
+WORKDIR /src
+
+# Copy project file and restore dependencies
+COPY auditor/Auditor.csproj ./auditor/
+RUN dotnet restore ./auditor/Auditor.csproj
+
+# Copy source code and build
+COPY auditor/ ./auditor/
+WORKDIR /src/auditor
+RUN dotnet publish -c Release -o /app/publish --no-restore
+
+#############################################
+# Runtime stage
+#############################################
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS runtime
+WORKDIR /app
+
+# Install AWS Lambda runtime
+RUN apk add --no-cache ca-certificates
+
+# Create non-root user for security
+RUN addgroup -S cloudsentinel && adduser -S cloudsentinel -G cloudsentinel
+USER cloudsentinel
+
+# Copy published app
+COPY --from=build /app/publish .
+
+# Set environment variables
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+ENV AWS_LAMBDA_FUNCTION_HANDLER=Auditor::Auditor.Function::FunctionHandler
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+
+EXPOSE 8080
+
+ENTRYPOINT ["dotnet", "Auditor.dll"]

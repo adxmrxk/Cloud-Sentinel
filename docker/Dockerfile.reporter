@@ -1,0 +1,59 @@
+#############################################
+# CloudSentinel Reporter - Multi-stage Docker Build
+# Python Flask API Container
+#############################################
+
+# Build stage
+FROM python:3.11-slim AS builder
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install Python dependencies
+COPY reporter/requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+#############################################
+# Runtime stage
+#############################################
+FROM python:3.11-slim AS runtime
+WORKDIR /app
+
+# Create non-root user for security
+RUN groupadd -r cloudsentinel && useradd -r -g cloudsentinel cloudsentinel
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy application code
+COPY reporter/ .
+
+# Set ownership
+RUN chown -R cloudsentinel:cloudsentinel /app
+
+# Switch to non-root user
+USER cloudsentinel
+
+# Environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    FLASK_ENV=production \
+    PORT=8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+
+EXPOSE 8000
+
+# Run with gunicorn for production
+CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "4", "--threads", "2", "app:app"]
