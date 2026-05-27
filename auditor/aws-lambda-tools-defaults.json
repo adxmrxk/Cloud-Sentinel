@@ -1,0 +1,12 @@
+{
+  "Information": [
+    "This file provides default values for the deployment wizard inside Visual Studio and the AWS Lambda CLI."
+  ],
+  "profile": "",
+  "region": "",
+  "configuration": "Release",
+  "function-runtime": "dotnet8",
+  "function-memory-size": 256,
+  "function-timeout": 30,
+  "function-handler": "Auditor::Auditor.Function::FunctionHandler"
+}
