@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudsentinel-config
+  namespace: cloudsentinel
+  labels:
+    app.kubernetes.io/name: cloudsentinel
+data:
+  AWS_REGION: "us-east-1"
+  DYNAMODB_TABLE: "SecurityAudits"
+  LOG_LEVEL: "INFO"
+  FLASK_ENV: "production"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  PROMETHEUS_ENABLED: "true"
+  JAEGER_ENABLED: "true"
+  JAEGER_AGENT_HOST: "jaeger-agent"
