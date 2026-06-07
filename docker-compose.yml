@@ -49,6 +49,7 @@ services:
       - AWS_REGION=us-east-1
       - DYNAMODB_ENDPOINT=http://dynamodb-local:8000
       - REDIS_URL=redis://redis:6379/0
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
     ports:
       - "8000:8000"
     volumes:

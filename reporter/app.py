@@ -4,6 +4,8 @@ CloudSentinel Reporter - Flask API for ingesting findings and serving dashboard
 import os
 import json
 import uuid
+import urllib.request
+import urllib.error
 from datetime import datetime
 from functools import lru_cache
 
@@ -35,11 +37,88 @@ def get_secret():
         return {"webhook_url": None}
 
 
+def get_webhook_url():
+    """Resolve the Slack webhook URL. Env var wins over Secrets Manager."""
+    env_url = (os.environ.get('SLACK_WEBHOOK_URL') or '').strip()
+    if env_url and 'PLACEHOLDER' not in env_url:
+        return env_url
+    secret_url = (get_secret().get('webhook_url') or '').strip()
+    if secret_url and 'PLACEHOLDER' not in secret_url:
+        return secret_url
+    return None
+
+
+def send_slack_alert(audit_id, at_risk_buckets, total_scanned):
+    """POST a formatted alert to the Slack incoming webhook.
+
+    Returns True if Slack accepted the message, False otherwise.
+    Failures are swallowed so a Slack outage cannot break /ingest.
+    """
+    webhook_url = get_webhook_url()
+    if not webhook_url:
+        app.logger.info("No Slack webhook configured; skipping notification")
+        return False
+
+    severity_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+    for bucket in at_risk_buckets:
+        sev = bucket.get('Severity', 'LOW')
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+    top_lines = []
+    for bucket in at_risk_buckets[:5]:
+        name = bucket.get('BucketName', 'unknown')
+        sev = bucket.get('Severity', 'LOW')
+        top_lines.append(f"• `{name}`: *{sev}*")
+    if len(at_risk_buckets) > 5:
+        top_lines.append(f"_...and {len(at_risk_buckets) - 5} more_")
+
+    message = {
+        "text": f"CloudSentinel: {len(at_risk_buckets)} S3 bucket(s) at risk",
+        "blocks": [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": "CloudSentinel Security Alert"}
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Audit ID:*\n`{audit_id[:8]}`"},
+                    {"type": "mrkdwn", "text": f"*Buckets scanned:*\n{total_scanned}"},
+                    {"type": "mrkdwn", "text": f"*At risk:*\n{len(at_risk_buckets)}"},
+                    {"type": "mrkdwn", "text": f"*Critical:*\n{severity_counts['CRITICAL']}"}
+                ]
+            },
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Top findings:*\n" + "\n".join(top_lines)}
+            }
+        ]
+    }
+
+    try:
+        req = urllib.request.Request(
+            webhook_url,
+            data=json.dumps(message).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            if 200 <= response.status < 300:
+                app.logger.info(f"Slack notified for audit {audit_id}")
+                return True
+            app.logger.error(f"Slack webhook returned HTTP {response.status}")
+            return False
+    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+        app.logger.error(f"Slack webhook failed: {e}")
+        return False
+
+
 @app.route('/ingest', methods=['POST'])
 def ingest_findings():
     """
     POST /ingest
-    Receives audit findings from Step Functions and stores in DynamoDB
+    Receives audit findings from Step Functions, stores them in DynamoDB,
+    and posts an alert to Slack if any vulnerabilities were found.
     """
     try:
         if request.is_json:
@@ -51,28 +130,34 @@ def ingest_findings():
         audit_id = str(uuid.uuid4())
         timestamp = datetime.utcnow().isoformat()
 
-        secrets = get_secret()
-        webhook_url = secrets.get('webhook_url')
+        at_risk_buckets = data.get('atRiskBuckets', [])
+        vulnerabilities_found = data.get('vulnerabilitiesFound', False)
+        total_scanned = data.get('totalBucketsScanned', 0)
+
+        slack_sent = False
+        if vulnerabilities_found and at_risk_buckets:
+            slack_sent = send_slack_alert(audit_id, at_risk_buckets, total_scanned)
 
         item = {
             'auditId': audit_id,
             'timestamp': timestamp,
-            'vulnerabilitiesFound': data.get('vulnerabilitiesFound', False),
-            'totalBucketsScanned': data.get('totalBucketsScanned', 0),
-            'atRiskBuckets': data.get('atRiskBuckets', []),
+            'vulnerabilitiesFound': vulnerabilities_found,
+            'totalBucketsScanned': total_scanned,
+            'atRiskBuckets': at_risk_buckets,
             'auditTimestamp': data.get('auditTimestamp', timestamp),
             'status': 'PROCESSED',
-            'webhookNotified': webhook_url is not None
+            'slackNotified': slack_sent
         }
 
         table.put_item(Item=item)
 
-        app.logger.info(f"Stored audit {audit_id} with {len(item['atRiskBuckets'])} findings")
+        app.logger.info(f"Stored audit {audit_id} with {len(at_risk_buckets)} findings")
 
         return jsonify({
             'status': 'success',
             'auditId': audit_id,
-            'findingsCount': len(item['atRiskBuckets']),
+            'findingsCount': len(at_risk_buckets),
+            'slackNotified': slack_sent,
             'message': 'Findings ingested successfully'
         }), 201
 
