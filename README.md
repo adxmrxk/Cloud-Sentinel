@@ -2,7 +2,7 @@
 
 **Automated Cloud Security Posture Management (CSPM) Platform**
 
-CloudSentinel is a security governance tool that automatically scans cloud infrastructure for misconfigurations, stores findings in a central datastore, and alerts on vulnerabilities — built on a serverless, event-driven architecture and shipped through a full CI/CD pipeline.
+CloudSentinel is a security governance tool that automatically scans cloud infrastructure for misconfigurations, stores findings in a central datastore, and alerts on vulnerabilities. It is built on a serverless, event-driven architecture and shipped through a full CI/CD pipeline.
 
 ---
 
@@ -19,7 +19,6 @@ CloudSentinel is a security governance tool that automatically scans cloud infra
 - [CI/CD Pipeline](#cicd-pipeline)
 - [Observability](#observability)
 - [Security Hardening](#security-hardening)
-- [Roadmap](#roadmap)
 - [License](#license)
 
 ---
@@ -32,9 +31,9 @@ CloudSentinel is a **Cloud Security Posture Management (CSPM)** platform. It run
 
 ### The Problem It Solves
 
-Misconfigured cloud resources are the **number one cause of real-world data breaches**. The most common culprit: publicly exposed object storage. Capital One, Accenture, and the U.S. Department of Defense have all leaked data through misconfigured S3 buckets.
+Misconfigured cloud resources are the **number one cause of real-world data breaches**. The most common culprit is publicly exposed object storage. Capital One, Accenture, and the U.S. Department of Defense have all leaked data through misconfigured S3 buckets.
 
-The challenge is that cloud environments change constantly — new buckets get created, security settings drift, engineers ship configurations that look fine in isolation but introduce risk at scale. Manual review doesn't scale.
+The challenge is that cloud environments change constantly. New buckets get created, security settings drift, and engineers ship configurations that look fine in isolation but introduce risk at scale. Manual review doesn't scale.
 
 CloudSentinel solves this by:
 
@@ -52,7 +51,7 @@ The current scanner targets the highest-impact misconfiguration class: **AWS S3 
 | `CRITICAL` | All 4 protections disabled, or no Public Access Block configured at all |
 | `HIGH`     | 3 of 4 protections disabled |
 | `MEDIUM`   | 2 of 4 protections disabled |
-| `LOW`      | 0–1 protections disabled |
+| `LOW`      | 0 to 1 protections disabled |
 
 ---
 
@@ -75,7 +74,7 @@ The system runs as a four-stage pipeline orchestrated by AWS Step Functions:
        • Returns JSON: at-risk buckets + severity scores
                    │
                    ▼
-   2.  Choice State — any vulnerabilities found?
+   2.  Choice State: any vulnerabilities found?
        │
        ├── NO  ──▶ Workflow ends successfully
        │
@@ -88,7 +87,7 @@ The system runs as a four-stage pipeline orchestrated by AWS Step Functions:
        • Records audit metadata + timestamp
                    │
                    ▼
-   4.  SNS Topic — security alert published
+   4.  SNS Topic: security alert published
        └── Fans out to Slack, email, PagerDuty
                    │
                    ▼
@@ -103,7 +102,7 @@ The system runs as a four-stage pipeline orchestrated by AWS Step Functions:
 
 - **Orchestration is external to the services.** The Auditor and Reporter don't know about each other. Step Functions owns the workflow, which means each component is independently testable and replaceable.
 - **The Choice state prevents alert fatigue.** Notifications only fire when vulnerabilities are actually found.
-- **The Reporter runs in two modes from one codebase.** Wrapped with Mangum, the same Flask app runs as a Lambda behind API Gateway *and* as a containerized service in Kubernetes.
+- **The Reporter runs in two modes from one codebase.** Wrapped with Mangum, the same Flask app runs as a Lambda behind API Gateway, and as a containerized service in Kubernetes.
 
 ---
 
@@ -155,8 +154,8 @@ The system runs as a four-stage pipeline orchestrated by AWS Step Functions:
 | Component  | Technology              | Why It's Used |
 |------------|-------------------------|---------------|
 | Auditor    | **.NET 8 (C#)**         | Strong typing for AWS SDK calls, fast cold starts via `PublishReadyToRun`, official first-class AWS Lambda support |
-| Reporter   | **Python 3.11 + Flask** | Lowest-friction web framework for the dashboard + ingestion API, plus the massive `boto3` ecosystem for AWS integration |
-| Adapter    | **Mangum**              | WSGI → Lambda adapter. Lets the Flask app run identically in Lambda *and* in a container — one codebase, two runtimes |
+| Reporter   | **Python 3.11 + Flask** | Lowest-friction web framework for the dashboard and ingestion API, plus the massive `boto3` ecosystem for AWS integration |
+| Adapter    | **Mangum**              | WSGI to Lambda adapter. Lets the Flask app run identically in Lambda and in a container. One codebase, two runtimes. |
 
 ### Cloud Services (AWS)
 
@@ -164,9 +163,9 @@ The system runs as a four-stage pipeline orchestrated by AWS Step Functions:
 |--------------------|---------|
 | **DynamoDB**       | Findings storage. NoSQL fits the time-series, write-heavy access pattern; PAY_PER_REQUEST means zero cost when idle |
 | **Step Functions** | Workflow orchestration. Handles retries, branching logic, and failure paths declaratively |
-| **EventBridge**    | Scheduled triggers — fires the audit pipeline every 24 hours |
-| **SNS**            | Pub/sub alerting. One topic fans out to Slack, email, PagerDuty subscribers |
-| **SQS**            | Dead-letter queue for failed audits — preserves messages for 14 days for debugging |
+| **EventBridge**    | Scheduled triggers that fire the audit pipeline every 24 hours |
+| **SNS**            | Pub/sub alerting. One topic fans out to Slack, email, and PagerDuty subscribers |
+| **SQS**            | Dead-letter queue for failed audits. Preserves messages for 14 days for debugging |
 | **Secrets Manager**| Stores webhook URLs and credentials; fetched at runtime, cached in-process |
 | **Lambda**         | Serverless compute for both Auditor and Reporter |
 | **API Gateway**    | HTTPS endpoint fronting the Reporter Lambda |
@@ -181,16 +180,16 @@ The system runs as a four-stage pipeline orchestrated by AWS Step Functions:
 | **Helm**      | Templated, versioned Kubernetes deployment with rollback support |
 | **Kustomize** | Raw Kubernetes manifests with environment-specific overlays |
 
-### Containers & Orchestration
+### Containers and Orchestration
 
 | Tool             | Purpose |
 |------------------|---------|
 | **Docker**       | Multi-stage builds for both services (build-time tooling stays out of runtime images) |
-| **Docker Compose** | Full local development stack — services, datastores, and observability in one command |
+| **Docker Compose** | Full local development stack with services, datastores, and observability in one command |
 | **Kubernetes**   | Production orchestration with HorizontalPodAutoscaler, rolling updates, and pod anti-affinity |
 | **NGINX**        | Reverse proxy with rate limiting, security headers, and upstream load balancing |
 
-### Data & Caching
+### Data and Caching
 
 | Component      | Purpose |
 |----------------|---------|
@@ -206,7 +205,7 @@ The system runs as a four-stage pipeline orchestrated by AWS Step Functions:
 | **Grafana**         | Dashboards and alerting on Prometheus data |
 | **Jaeger + OpenTelemetry** | Distributed tracing across the audit pipeline |
 
-### Security & Quality
+### Security and Quality
 
 | Tool       | Purpose |
 |------------|---------|
@@ -219,7 +218,7 @@ The system runs as a four-stage pipeline orchestrated by AWS Step Functions:
 
 | Tool                    | Purpose |
 |-------------------------|---------|
-| **GitHub Actions**      | End-to-end pipeline: lint → test → scan → build → deploy |
+| **GitHub Actions**      | End-to-end pipeline: lint, test, scan, build, deploy |
 | **GitHub Container Registry (GHCR)** | Container image hosting |
 | **Codecov**             | Test coverage tracking |
 
@@ -231,11 +230,11 @@ The system runs as a four-stage pipeline orchestrated by AWS Step Functions:
 CloudSentinel/
 │
 ├── auditor/                     .NET 8 scanner
-│   ├── Function.cs              S3 scanning logic + severity scoring
+│   ├── Function.cs              S3 scanning logic and severity scoring
 │   ├── Auditor.csproj           .NET project, AWS SDK dependencies
 │   └── aws-lambda-tools-defaults.json
 │
-├── reporter/                    Python Flask API + dashboard
+├── reporter/                    Python Flask API and dashboard
 │   ├── app.py                   POST /ingest, GET /, GET /health
 │   ├── requirements.txt
 │   └── templates/
@@ -263,17 +262,17 @@ CloudSentinel/
 │   ├── namespace.yaml
 │   ├── configmap.yaml           Non-secret environment configuration
 │   ├── secret.yaml              Sensitive credentials (use ExternalSecrets in prod)
-│   ├── serviceaccount.yaml      ServiceAccount + Role + RoleBinding for IRSA
-│   ├── auditor-deployment.yaml  Deployment + Service for the auditor
-│   ├── reporter-deployment.yaml Deployment + Service with rolling updates
-│   ├── redis-deployment.yaml    Deployment + Service + PersistentVolumeClaim
+│   ├── serviceaccount.yaml      ServiceAccount, Role, and RoleBinding for IRSA
+│   ├── auditor-deployment.yaml  Deployment and Service for the auditor
+│   ├── reporter-deployment.yaml Deployment and Service with rolling updates
+│   ├── redis-deployment.yaml    Deployment, Service, and PersistentVolumeClaim
 │   ├── ingress.yaml             NGINX Ingress with TLS via cert-manager
 │   ├── hpa.yaml                 HorizontalPodAutoscaler (asymmetric scale behavior)
 │   ├── cronjob.yaml             Scheduled audit job (daily)
 │   └── kustomization.yaml       Kustomize entry point
 │
 ├── helm/cloudsentinel/          Helm chart (production-grade packaging)
-│   ├── Chart.yaml               Metadata + subchart dependencies
+│   ├── Chart.yaml               Metadata and subchart dependencies
 │   ├── values.yaml              Configurable values
 │   └── templates/
 │       ├── _helpers.tpl
@@ -284,7 +283,7 @@ CloudSentinel/
 │       └── serviceaccount.yaml
 │
 ├── .github/workflows/
-│   └── ci-cd.yaml               Full pipeline: scan → build → test → deploy
+│   └── ci-cd.yaml               Full pipeline: scan, build, test, deploy
 │
 ├── template.yaml                AWS SAM template (serverless deployment path)
 ├── samconfig.toml               SAM CLI configuration
@@ -328,11 +327,11 @@ That's it. Within a minute or two you'll have:
 
 | Service     | URL                          | Login |
 |-------------|------------------------------|-------|
-| Dashboard   | http://localhost:8000        | —     |
+| Dashboard   | http://localhost:8000        |       |
 | Grafana     | http://localhost:3000        | `admin` / `cloudsentinel` |
-| Prometheus  | http://localhost:9090        | —     |
-| Jaeger UI   | http://localhost:16686       | —     |
-| NGINX proxy | http://localhost (port 80)   | —     |
+| Prometheus  | http://localhost:9090        |       |
+| Jaeger UI   | http://localhost:16686       |       |
+| NGINX proxy | http://localhost (port 80)   |       |
 
 ### Trigger Your First Audit
 
@@ -433,8 +432,8 @@ terraform apply \
 | `DYNAMODB_ENDPOINT`       | Override for DynamoDB Local              | (uses AWS)               |
 | `REDIS_URL`               | Redis connection string                  | `redis://localhost:6379` |
 | `SECRET_NAME`             | Secrets Manager entry name               | `CloudSentinel/Config`   |
-| `LOG_LEVEL`               | `DEBUG` / `INFO` / `WARN` / `ERROR`      | `INFO`                   |
-| `SLACK_WEBHOOK_URL`       | Slack incoming webhook for alerts        | —                        |
+| `LOG_LEVEL`               | `DEBUG`, `INFO`, `WARN`, or `ERROR`      | `INFO`                   |
+| `SLACK_WEBHOOK_URL`       | Slack incoming webhook for alerts        |                          |
 | `PROMETHEUS_ENABLED`      | Toggle metrics endpoint                  | `true`                   |
 | `JAEGER_ENABLED`          | Toggle distributed tracing               | `true`                   |
 | `JAEGER_AGENT_HOST`       | Jaeger agent hostname                    | `localhost`              |
@@ -465,7 +464,7 @@ The GitHub Actions workflow ([.github/workflows/ci-cd.yaml](.github/workflows/ci
 | **IaC Security**   | Checkov, tfsec                   | Static analysis of Terraform code; results uploaded as SARIF |
 | **Build Auditor**  | .NET 8 SDK                       | Restore, build, test, publish |
 | **Build Reporter** | Python, flake8, Black, pytest    | Lint, format check, test with coverage |
-| **Build Images**   | Docker Buildx, GHCR              | Multi-tag publishing (branch / semver / sha) with layer caching |
+| **Build Images**   | Docker Buildx, GHCR              | Multi-tag publishing (branch, semver, sha) with layer caching |
 | **Container Scan** | Trivy                            | Vulnerability scan of both images |
 | **Deploy**         | Helm                             | Production deployment with rollout wait (main branch only) |
 | **Terraform**      | Terraform CLI                    | Plan on every push; apply only on main |
@@ -493,15 +492,15 @@ Pre-configured dashboards visualize:
 
 - Audit findings over time
 - Resource scanning throughput
-- API latency percentiles (p50 / p95 / p99)
+- API latency percentiles (p50, p95, p99)
 - Error rates by cloud provider
 
 ### Distributed Tracing (Jaeger)
 
 OpenTelemetry instrumentation traces requests across:
 
-- Auditor → Reporter → DynamoDB
-- API Gateway → Reporter
+- Auditor to Reporter to DynamoDB
+- API Gateway to Reporter
 - Cross-cloud operations
 
 ---
@@ -513,39 +512,13 @@ CloudSentinel is built with defense-in-depth principles applied at every layer:
 | Layer            | Controls |
 |------------------|----------|
 | **IAM**          | Least-privilege roles per service; no wildcard policies on sensitive resources |
-| **Secrets**      | Stored in AWS Secrets Manager / Azure Key Vault / GCP Secret Manager — never in code or environment files |
+| **Secrets**      | Stored in AWS Secrets Manager, Azure Key Vault, or GCP Secret Manager. Never in code or environment files |
 | **Containers**   | Non-root user, `readOnlyRootFilesystem: true`, all Linux capabilities dropped, `allowPrivilegeEscalation: false` |
 | **Network**      | Kubernetes NetworkPolicies, NGINX rate limiting, TLS-only ingress |
 | **Transport**    | cert-manager + Let's Encrypt for automated TLS certificate management |
-| **Identity**     | IRSA (IAM Roles for Service Accounts) on EKS — no static AWS credentials in pods |
+| **Identity**     | IRSA (IAM Roles for Service Accounts) on EKS. No static AWS credentials in pods |
 | **CI Supply Chain** | Container vulnerability scanning gates deployment; SARIF reporting to GitHub Security |
 | **Storage**      | S3 buckets created by Terraform have all four Public Access Block protections enabled, versioning on, AES-256 server-side encryption |
-
----
-
-## Roadmap
-
-CloudSentinel's current scanner focuses on the highest-impact misconfiguration class. Planned expansions:
-
-### Short Term
-
-- [ ] **EC2 scanner** — flag instances with public IPs, open security groups, unencrypted volumes
-- [ ] **IAM scanner** — detect users without MFA, unused access keys, overly permissive policies
-- [ ] **RDS scanner** — public-facing databases, unencrypted instances, missing backup configuration
-- [ ] **Test coverage** — unit and integration tests for both services
-
-### Medium Term
-
-- [ ] **Azure scanning** — Blob containers, NSG rules, Key Vault access policies (infrastructure already scaffolded in Terraform)
-- [ ] **GCP scanning** — Cloud Storage IAM, Compute firewall rules, service account audit (infrastructure already scaffolded)
-- [ ] **Auto-remediation** — opt-in `remediation/` Lambdas that automatically fix CRITICAL findings (e.g., enable Public Access Block on a flagged bucket)
-- [ ] **Compliance mapping** — `compliance/` module mapping findings to CIS, PCI-DSS, HIPAA, SOC 2 controls
-
-### Long Term
-
-- [ ] **Event-driven scanning** — react to CloudTrail / EventBridge events for real-time detection instead of 24-hour polling
-- [ ] **Drift detection** — compare current state to a known-good baseline and alert on changes
-- [ ] **Multi-account support** — scan across an AWS Organization via cross-account assume-role
 
 ---
 
