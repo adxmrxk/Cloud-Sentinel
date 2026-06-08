@@ -118,10 +118,31 @@ resource "aws_secretsmanager_secret_version" "config" {
 }
 
 #############################################
+# KMS Key for Reports Bucket Encryption
+#############################################
+
+resource "aws_kms_key" "reports" {
+  description             = "KMS key for CloudSentinel reports bucket encryption"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  tags = {
+    Name = "CloudSentinel-Reports-KMS"
+  }
+}
+
+resource "aws_kms_alias" "reports" {
+  name          = "alias/cloudsentinel-reports-${var.environment}"
+  target_key_id = aws_kms_key.reports.key_id
+}
+
+#############################################
 # S3 Bucket for Reports
 #############################################
 
 resource "aws_s3_bucket" "reports" {
+  # checkov:skip=CKV_AWS_144:Cross-region replication adds substantial cost and is not required for non-critical audit reports; findings of record live in DynamoDB.
+  # checkov:skip=CKV2_AWS_62:S3 event notifications are not used; downstream consumers read findings from DynamoDB, not from S3 object events.
   bucket = "cloudsentinel-reports-${var.environment}-${random_id.bucket_suffix.hex}"
 
   tags = {
@@ -145,8 +166,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "reports" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.reports.arn
     }
+    bucket_key_enabled = true
   }
 }
 
@@ -157,6 +180,44 @@ resource "aws_s3_bucket_public_access_block" "reports" {
   block_public_policy     = true
   ignore_public_acls      = true
   restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "reports" {
+  bucket = aws_s3_bucket.reports.id
+
+  rule {
+    id     = "archive-and-expire"
+    status = "Enabled"
+
+    filter {}
+
+    transition {
+      days          = 90
+      storage_class = "STANDARD_IA"
+    }
+
+    transition {
+      days          = 180
+      storage_class = "GLACIER"
+    }
+
+    expiration {
+      days = 365
+    }
+
+    noncurrent_version_transition {
+      noncurrent_days = 30
+      storage_class   = "STANDARD_IA"
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 90
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
 }
 
 #############################################
