@@ -92,6 +92,19 @@
         .severity-high { color: #fb923c; font-weight: 600; }
         .severity-medium { color: #fbbf24; font-weight: 600; }
         .severity-low { color: #4ade80; font-weight: 600; }
+        .section-title { font-size: 1.25rem; color: #cbd5e1; margin-bottom: 0.25rem; }
+        .section-subtitle { margin-bottom: 1rem; }
+        .section-gap { margin-bottom: 2rem; }
+        .pager {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 1rem;
+        }
+
+        .pager a {
+            color: #60a5fa;
+            text-decoration: none;
+        }
     </style>
 </head>
 <body>
@@ -102,7 +115,7 @@
                 <p class="subtitle">S3 Bucket Security Governance Platform</p>
             </div>
             <span class="timestamp">
-                {% if audits %}
+                {% if audits and not paged %}
                     Last scan: {{ audits[0].timestamp }}
                 {% else %}
                     No scans yet
@@ -112,42 +125,51 @@
 
         <div class="stats">
             <div class="stat-card">
-                <div class="stat-value">{{ audits | length }}</div>
+                <div class="stat-value">{{ stats.audits }}</div>
                 <div class="stat-label">Total Audits</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value">
-                    {% set total_buckets = namespace(count=0) %}
-                    {% for audit in audits %}
-                        {% set total_buckets.count = total_buckets.count + (audit.totalBucketsScanned | default(0) | int) %}
-                    {% endfor %}
-                    {{ total_buckets.count }}
-                </div>
+                <div class="stat-value">{{ stats.bucketsScanned }}</div>
                 <div class="stat-label">Buckets Scanned</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value">
-                    {% set total_findings = namespace(count=0) %}
-                    {% for audit in audits %}
-                        {% set total_findings.count = total_findings.count + (audit.atRiskBuckets | default([]) | length) %}
-                    {% endfor %}
-                    {{ total_findings.count }}
-                </div>
+                <div class="stat-value">{{ stats.findings }}</div>
                 <div class="stat-label">Total Findings</div>
             </div>
             <div class="stat-card">
-                <div class="stat-value">
-                    {% set vuln_audits = namespace(count=0) %}
-                    {% for audit in audits %}
-                        {% if audit.vulnerabilitiesFound %}
-                            {% set vuln_audits.count = vuln_audits.count + 1 %}
-                        {% endif %}
-                    {% endfor %}
-                    {{ vuln_audits.count }}
-                </div>
+                <div class="stat-value">{{ stats.vulnerableAudits }}</div>
                 <div class="stat-label">Audits with Issues</div>
             </div>
         </div>
+
+        {% if top_resources %}
+        <h2 class="section-title">Repeat Offenders</h2>
+        <p class="subtitle section-subtitle">Resources flagged most often across all audits (PostgreSQL findings store)</p>
+        <div class="table-container section-gap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Resource</th>
+                        <th>Provider</th>
+                        <th>Audits Flagged</th>
+                        <th>Worst Severity</th>
+                        <th>Last Seen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in top_resources %}
+                    <tr>
+                        <td><strong>{{ r.resourceName }}</strong></td>
+                        <td>{{ r.cloudProvider | upper }}</td>
+                        <td>{{ r.occurrences }}</td>
+                        <td><span class="severity-{{ r.worstSeverity | lower }}">{{ r.worstSeverity }}</span></td>
+                        <td class="timestamp">{{ r.lastSeen }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
 
         {% if audits %}
         <div class="table-container">
@@ -194,6 +216,10 @@
                 </tbody>
             </table>
         </div>
+        <nav class="pager">
+            {% if paged %}<a href="./">&larr; Newest audits</a>{% endif %}
+            {% if next_cursor %}<a href="?cursor={{ next_cursor | urlencode }}">Older audits &rarr;</a>{% endif %}
+        </nav>
         {% else %}
         <div class="empty-state">
             <h2>No Audits Yet</h2>
