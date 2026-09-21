@@ -7,11 +7,13 @@ metadata:
     app.kubernetes.io/name: cloudsentinel
 data:
   AWS_REGION: "us-east-1"
-  DYNAMODB_TABLE: "SecurityAudits"
+  # Read by the reporter (it was previously set as DYNAMODB_TABLE, which
+  # nothing reads).
+  TABLE_NAME: "SecurityAudits"
   LOG_LEVEL: "INFO"
   FLASK_ENV: "production"
   REDIS_HOST: "redis-service"
   REDIS_PORT: "6379"
-  PROMETHEUS_ENABLED: "true"
-  JAEGER_ENABLED: "true"
-  JAEGER_AGENT_HOST: "jaeger-agent"
+  # Tracing is off unless an OTLP/HTTP collector is configured, e.g.
+  # "http://jaeger-collector.observability:4318".
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""

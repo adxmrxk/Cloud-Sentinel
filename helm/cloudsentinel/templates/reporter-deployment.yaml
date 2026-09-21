@@ -40,8 +40,16 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            - name: AWS_REGION
+              value: {{ .Values.cloudProviders.aws.region | quote }}
+            {{- if .Values.redis.enabled }}
             - name: REDIS_HOST
               value: "{{ include "cloudsentinel.fullname" . }}-redis-master"
+            {{- end }}
+            {{- with .Values.tracing.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ include "cloudsentinel.fullname" . }}-secrets

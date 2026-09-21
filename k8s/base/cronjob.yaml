@@ -1,10 +1,13 @@
+# The auditor is a batch job, not a service: each run scans every bucket
+# once, POSTs the result to the reporter, and exits. It used to also be
+# deployed as a long-running Deployment, which only sat idle.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: cloudsentinel-audit
   namespace: cloudsentinel
   labels:
-    app.kubernetes.io/name: cloudsentinel
+    app.kubernetes.io/name: auditor
     app.kubernetes.io/component: scheduler
 spec:
   schedule: "0 0 * * *"  # Daily at midnight UTC
@@ -18,7 +21,7 @@ spec:
       template:
         metadata:
           labels:
-            app.kubernetes.io/name: cloudsentinel
+            app.kubernetes.io/name: auditor
             app.kubernetes.io/component: audit-job
         spec:
           serviceAccountName: cloudsentinel-sa
@@ -26,17 +29,18 @@ spec:
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: auditor
-              image: ghcr.io/cloudsentinel/auditor:latest
+              image: ghcr.io/adxmrxk/cloudsentinel-auditor:latest
               imagePullPolicy: Always
-              command:
-                - /bin/sh
-                - -c
-                - |
-                  echo "Starting CloudSentinel Multi-Cloud Audit..."
-                  dotnet Auditor.dll --full-scan
-                  echo "Audit complete!"
+              # Overrides the Lambda base image entrypoint; runs one scan.
+              command: ["dotnet", "/var/task/Auditor.dll", "--full-scan"]
+              env:
+                - name: REPORTER_URL
+                  value: "http://reporter-service:8000"
               envFrom:
                 - configMapRef:
                     name: cloudsentinel-config
@@ -45,7 +49,19 @@ spec:
               resources:
                 requests:
                   cpu: 200m
-                  memory: 512Mi
+                  memory: 256Mi
                 limits:
                   cpu: 1000m
-                  memory: 1Gi
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

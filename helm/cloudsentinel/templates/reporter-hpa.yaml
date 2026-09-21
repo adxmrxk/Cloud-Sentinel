@@ -1,0 +1,22 @@
+{{- if and .Values.reporter.enabled .Values.reporter.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "cloudsentinel.fullname" . }}-reporter
+  labels:
+    {{- include "cloudsentinel.reporter.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "cloudsentinel.fullname" . }}-reporter
+  minReplicas: {{ .Values.reporter.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.reporter.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.reporter.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

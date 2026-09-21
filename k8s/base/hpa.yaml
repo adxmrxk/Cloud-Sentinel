@@ -42,25 +42,3 @@ spec:
           value: 4
           periodSeconds: 15
       selectPolicy: Max
----
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: auditor-hpa
-  namespace: cloudsentinel
-  labels:
-    app.kubernetes.io/name: auditor
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: auditor
-  minReplicas: 1
-  maxReplicas: 5
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
