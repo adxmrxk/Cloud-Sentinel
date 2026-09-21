@@ -14,20 +14,30 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  - job_name: 'cloudsentinel-reporter'
-    static_configs:
-      - targets: ['reporter:8000']
-    metrics_path: '/metrics'
-
-  - job_name: 'cloudsentinel-auditor'
-    static_configs:
-      - targets: ['auditor:8080']
-    metrics_path: '/metrics'
-
-  - job_name: 'redis'
-    static_configs:
-      - targets: ['redis:6379']
-
-  - job_name: 'nginx'
-    static_configs:
-      - targets: ['nginx:80']
+  # The jobs below are disabled because nothing serves the endpoints they
+  # scrape. Each was permanently DOWN: the two services return 404 (neither
+  # app is instrumented), and Redis/NGINX do not speak Prometheus at all.
+  # Re-enable each one only once its exporter or instrumentation exists.
+  #
+  # Needs prometheus_client instrumentation in reporter/app.py:
+  # - job_name: 'cloudsentinel-reporter'
+  #   static_configs:
+  #     - targets: ['reporter:8000']
+  #   metrics_path: '/metrics'
+  #
+  # Needs a metrics endpoint in the auditor (it is a Lambda, so this most
+  # likely belongs in CloudWatch rather than Prometheus):
+  # - job_name: 'cloudsentinel-auditor'
+  #   static_configs:
+  #     - targets: ['auditor:8080']
+  #   metrics_path: '/metrics'
+  #
+  # Needs a redis_exporter sidecar (Redis serves RESP, not HTTP):
+  # - job_name: 'redis'
+  #   static_configs:
+  #     - targets: ['redis-exporter:9121']
+  #
+  # Needs nginx-prometheus-exporter plus stub_status in nginx.conf:
+  # - job_name: 'nginx'
+  #   static_configs:
+  #     - targets: ['nginx-exporter:9113']

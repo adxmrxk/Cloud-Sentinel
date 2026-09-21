@@ -45,15 +45,14 @@ spec:
           envFrom:
             - secretRef:
                 name: {{ include "cloudsentinel.fullname" . }}-secrets
+          # Lambda runtime container: no /health route, probe the socket.
           livenessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: http
             initialDelaySeconds: 30
             periodSeconds: 10
           readinessProbe:
-            httpGet:
-              path: /health
+            tcpSocket:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 5

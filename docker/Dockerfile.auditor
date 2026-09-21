@@ -4,42 +4,38 @@
 #############################################
 
 # Build stage
-FROM mcr.microsoft.com/dotnet/sdk:8.0-alpine AS build
+# Uses the glibc SDK (not alpine/musl) so the output runs on the
+# Amazon Linux based AWS Lambda .NET runtime image below.
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
-# Copy project file and restore dependencies
+# Copy project file and restore dependencies.
+# The runtime identifier is required because the project sets
+# PublishReadyToRun, which cannot resolve a runtime package without one.
 COPY auditor/Auditor.csproj ./auditor/
-RUN dotnet restore ./auditor/Auditor.csproj
+RUN dotnet restore ./auditor/Auditor.csproj -r linux-x64
 
 # Copy source code and build
 COPY auditor/ ./auditor/
 WORKDIR /src/auditor
-RUN dotnet publish -c Release -o /app/publish --no-restore
+RUN dotnet publish -c Release -r linux-x64 --self-contained false -o /app/publish --no-restore
 
 #############################################
 # Runtime stage
 #############################################
-FROM mcr.microsoft.com/dotnet/aspnet:8.0-alpine AS runtime
-WORKDIR /app
+# The AWS Lambda .NET 8 base image supplies the Lambda Runtime Interface
+# Client and, for local use, the Runtime Interface Emulator on port 8080.
+# The previous aspnet image could not run this assembly at all: the project
+# is a Lambda class library with no Main, so `dotnet Auditor.dll` failed with
+# MissingMethodException: Entry point not found.
+FROM public.ecr.aws/lambda/dotnet:8 AS runtime
 
-# Install AWS Lambda runtime
-RUN apk add --no-cache ca-certificates
+# Copy published app into the Lambda task root
+COPY --from=build /app/publish ${LAMBDA_TASK_ROOT}
 
-# Create non-root user for security
-RUN addgroup -S cloudsentinel && adduser -S cloudsentinel -G cloudsentinel
-USER cloudsentinel
-
-# Copy published app
-COPY --from=build /app/publish .
-
-# Set environment variables
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
-ENV AWS_LAMBDA_FUNCTION_HANDLER=Auditor::Auditor.Function::FunctionHandler
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 
 EXPOSE 8080
 
-ENTRYPOINT ["dotnet", "Auditor.dll"]
+# The Lambda runtime client resolves the handler from CMD
+CMD ["Auditor::Auditor.Function::FunctionHandler"]

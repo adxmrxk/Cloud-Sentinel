@@ -116,7 +116,7 @@ resource "azurerm_servicebus_queue" "audit_queue" {
   name         = "audit-queue"
   namespace_id = azurerm_servicebus_namespace.cloudsentinel.id
 
-  enable_partitioning   = false
+  partitioning_enabled  = false
   max_delivery_count    = 3
   dead_lettering_on_message_expiration = true
 }

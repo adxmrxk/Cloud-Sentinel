@@ -1,6 +1,7 @@
 """
 CloudSentinel Reporter - Flask API for ingesting findings and serving dashboard
 """
+
 import json
 import os
 import urllib.error
@@ -10,6 +11,7 @@ from datetime import datetime
 from functools import lru_cache
 
 import boto3
+from asgiref.wsgi import WsgiToAsgi
 from botocore.exceptions import ClientError
 from flask import Flask, jsonify, render_template, request
 from mangum import Mangum
@@ -20,7 +22,11 @@ TABLE_NAME = os.environ.get("TABLE_NAME", "SecurityAudits")
 SECRET_NAME = os.environ.get("SECRET_NAME", "CloudSentinel/Config")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
-dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+DYNAMODB_ENDPOINT = os.environ.get("DYNAMODB_ENDPOINT") or None
+
+dynamodb = boto3.resource(
+    "dynamodb", region_name=AWS_REGION, endpoint_url=DYNAMODB_ENDPOINT
+)
 secrets_client = boto3.client("secretsmanager", region_name=AWS_REGION)
 table = dynamodb.Table(TABLE_NAME)
 
@@ -160,9 +166,7 @@ def ingest_findings():
 
         table.put_item(Item=item)
 
-        app.logger.info(
-            f"Stored audit {audit_id} with {len(at_risk_buckets)} findings"
-        )
+        app.logger.info(f"Stored audit {audit_id} with {len(at_risk_buckets)} findings")
 
         return (
             jsonify(
@@ -212,4 +216,57 @@ def health():
     return jsonify({"status": "healthy", "service": "CloudSentinel-Reporter"})
 
 
-handler = Mangum(app, lifespan="off")
+class EnsureContentLength:
+    """ASGI shim that supplies a missing Content-Length header.
+
+    Mangum builds the ASGI scope directly from the Lambda event. API Gateway
+    always sends Content-Length, but a caller that constructs the event itself
+    (the Step Functions state machine does exactly this) does not. Without the
+    header the WSGI layer reports an empty body and Flask rejects the request
+    as malformed, so derive it from the body when it is absent.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = list(scope.get("headers") or [])
+        if any(name == b"content-length" for name, _ in headers):
+            await self.app(scope, receive, send)
+            return
+
+        chunks = []
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            chunks.append(message.get("body", b""))
+            more_body = message.get("more_body", False)
+        body = b"".join(chunks)
+
+        scope = dict(scope)
+        scope["headers"] = headers + [
+            (b"content-length", str(len(body)).encode("latin-1"))
+        ]
+
+        replayed = False
+
+        async def replay():
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.disconnect"}
+            replayed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
+# Mangum is an ASGI adapter and Flask is a WSGI application, so the app has to
+# be bridged to ASGI before Mangum can drive it. Passing the Flask object
+# straight to Mangum raises TypeError on every invocation.
+handler = Mangum(EnsureContentLength(WsgiToAsgi(app)), lifespan="off")

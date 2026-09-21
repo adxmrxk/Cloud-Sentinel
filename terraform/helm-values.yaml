@@ -1,0 +1,37 @@
+# Helm values rendered by terraform/main.tf (helm_release.cloudsentinel).
+# Consumed via templatefile(), so the placeholders below are Terraform
+# template interpolations, not Helm templating.
+
+global:
+  environment: ${environment}
+
+auditor:
+  enabled: true
+  replicaCount: ${replicas}
+  image:
+    repository: ghcr.io/cloudsentinel/auditor
+    tag: "${image_tag}"
+  env:
+    CLOUD_PROVIDER: "multi"
+    LOG_LEVEL: "INFO"
+    DYNAMODB_TABLE: "${dynamodb_table}"
+
+reporter:
+  enabled: true
+  replicaCount: ${replicas}
+  image:
+    repository: ghcr.io/cloudsentinel/reporter
+    tag: "${image_tag}"
+  env:
+    TABLE_NAME: "${dynamodb_table}"
+    LOG_LEVEL: "INFO"
+
+# Subcharts are disabled by default here; the local Compose stack and the
+# cluster's own monitoring are used instead. Enable them only after running
+# `helm dependency build` on the chart.
+redis:
+  enabled: false
+grafana:
+  enabled: false
+prometheus:
+  enabled: false

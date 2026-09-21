@@ -66,6 +66,10 @@ jobs:
       - name: Build
         run: dotnet build auditor/Auditor.csproj --configuration Release --no-restore
 
+      # NOTE: Auditor.csproj is the Lambda project, not a test project, so this
+      # step compiles and reports success while running zero tests. It is kept
+      # so the pipeline is ready for a real Auditor.Tests project, but it is
+      # not evidence that the scanner works.
       - name: Test
         run: dotnet test auditor/Auditor.csproj --no-build --verbosity normal
 
@@ -104,8 +108,20 @@ jobs:
       - name: Format check with Black
         run: black --check reporter/
 
+      # This repository currently contains no test files, so pytest exits 5
+      # ("no tests collected") and fails the job. Treat that one code as a
+      # non-failure until tests are added, but fail on any real test failure.
       - name: Test with pytest
-        run: pytest reporter/ --cov=reporter --cov-report=xml
+        run: |
+          set +e
+          pytest reporter/ --cov=reporter --cov-report=xml
+          code=$?
+          set -e
+          if [ "$code" -eq 5 ]; then
+            echo "::warning::No tests found in reporter/ - this project has no test suite yet."
+            exit 0
+          fi
+          exit $code
 
       - name: Upload coverage
         uses: codecov/codecov-action@v3
@@ -232,6 +248,18 @@ jobs:
         uses: azure/k8s-set-context@v3
         with:
           kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      # Subcharts are declared in Chart.yaml and pinned in Chart.lock, but the
+      # archives are not committed, so they must be fetched before install.
+      # `helm dependency build` resolves from the lock file, which requires the
+      # source repositories to be registered first.
+      - name: Resolve Helm dependencies
+        run: |
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo add grafana https://grafana.github.io/helm-charts
+          helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+          helm repo update
+          helm dependency build ./helm/cloudsentinel
 
       - name: Deploy with Helm
         run: |

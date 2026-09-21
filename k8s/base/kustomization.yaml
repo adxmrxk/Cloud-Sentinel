@@ -20,7 +20,7 @@ commonLabels:
   app.kubernetes.io/version: "1.0.0"
 
 images:
-  - name: cloudsentinel/auditor
+  - name: ghcr.io/cloudsentinel/auditor
     newTag: latest
-  - name: cloudsentinel/reporter
+  - name: ghcr.io/cloudsentinel/reporter
     newTag: latest

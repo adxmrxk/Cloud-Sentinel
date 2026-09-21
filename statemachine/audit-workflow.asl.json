@@ -19,7 +19,9 @@
       "Next": "CheckVulnerabilities",
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "Next": "AuditFailed",
           "ResultPath": "$.error"
         }
@@ -42,16 +44,45 @@
       "Parameters": {
         "FunctionName": "${ReporterFunctionArn}",
         "Payload": {
-          "httpMethod": "POST",
+          "resource": "/ingest",
           "path": "/ingest",
-          "body.$": "States.JsonToString($.auditResult)"
+          "httpMethod": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Host": "stepfunctions.internal"
+          },
+          "multiValueHeaders": {
+            "Content-Type": [
+              "application/json"
+            ]
+          },
+          "queryStringParameters": null,
+          "multiValueQueryStringParameters": null,
+          "pathParameters": null,
+          "stageVariables": null,
+          "requestContext": {
+            "resourcePath": "/ingest",
+            "httpMethod": "POST",
+            "path": "/Prod/ingest",
+            "stage": "Prod",
+            "protocol": "HTTP/1.1",
+            "requestId.$": "$$.Execution.Name",
+            "identity": {
+              "sourceIp": "0.0.0.0",
+              "userAgent": "AWSStepFunctions"
+            }
+          },
+          "body.$": "States.JsonToString($.auditResult)",
+          "isBase64Encoded": false
         }
       },
       "ResultPath": "$.reporterResult",
       "Next": "SendAlert",
       "Catch": [
         {
-          "ErrorEquals": ["States.ALL"],
+          "ErrorEquals": [
+            "States.ALL"
+          ],
           "Next": "ReportingFailed",
           "ResultPath": "$.error"
         }

@@ -28,3 +28,8 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# Helm
+# Chart.lock pins the resolved subchart versions and IS committed;
+# the downloaded archives are fetched with `helm dependency build`.
+helm/*/charts/

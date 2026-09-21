@@ -28,7 +28,7 @@ spec:
             runAsUser: 1000
           containers:
             - name: auditor
-              image: cloudsentinel/auditor:latest
+              image: ghcr.io/cloudsentinel/auditor:latest
               imagePullPolicy: Always
               command:
                 - /bin/sh

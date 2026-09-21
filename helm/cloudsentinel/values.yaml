@@ -10,7 +10,7 @@ auditor:
   enabled: true
   replicaCount: 2
   image:
-    repository: cloudsentinel/auditor
+    repository: ghcr.io/cloudsentinel/auditor
     tag: latest
     pullPolicy: Always
   resources:
@@ -34,7 +34,7 @@ reporter:
   enabled: true
   replicaCount: 3
   image:
-    repository: cloudsentinel/reporter
+    repository: ghcr.io/cloudsentinel/reporter
     tag: latest
     pullPolicy: Always
   service:

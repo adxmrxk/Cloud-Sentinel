@@ -34,7 +34,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: reporter
-          image: cloudsentinel/reporter:latest
+          image: ghcr.io/cloudsentinel/reporter:latest
           imagePullPolicy: Always
           ports:
             - name: http
