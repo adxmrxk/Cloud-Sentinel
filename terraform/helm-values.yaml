@@ -7,30 +7,28 @@ global:
 
 auditor:
   enabled: true
-  replicaCount: ${replicas}
   image:
-    repository: ghcr.io/cloudsentinel/auditor
+    repository: ghcr.io/adxmrxk/cloudsentinel-auditor
     tag: "${image_tag}"
-  env:
-    CLOUD_PROVIDER: "multi"
-    LOG_LEVEL: "INFO"
-    DYNAMODB_TABLE: "${dynamodb_table}"
+  env: {}
 
 reporter:
   enabled: true
   replicaCount: ${replicas}
   image:
-    repository: ghcr.io/cloudsentinel/reporter
+    repository: ghcr.io/adxmrxk/cloudsentinel-reporter
     tag: "${image_tag}"
   env:
     TABLE_NAME: "${dynamodb_table}"
     LOG_LEVEL: "INFO"
 
-# Subcharts are disabled by default here; the local Compose stack and the
-# cluster's own monitoring are used instead. Enable them only after running
-# `helm dependency build` on the chart.
+# Redis backs the dashboard cache. Grafana and Prometheus are left to the
+# cluster's existing monitoring stack. Subcharts are fetched by the
+# helm_release's dependency_update.
 redis:
-  enabled: false
+  enabled: true
+  image:
+    repository: bitnamilegacy/redis
 grafana:
   enabled: false
 prometheus:

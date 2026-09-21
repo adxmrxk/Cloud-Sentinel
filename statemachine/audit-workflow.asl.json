@@ -14,9 +14,11 @@
         "vulnerabilitiesFound.$": "$.Payload.vulnerabilitiesFound",
         "atRiskBuckets.$": "$.Payload.atRiskBuckets",
         "totalBucketsScanned.$": "$.Payload.totalBucketsScanned",
-        "auditTimestamp.$": "$.Payload.auditTimestamp"
+        "auditTimestamp.$": "$.Payload.auditTimestamp",
+        "scanDurationSeconds.$": "$.Payload.scanDurationSeconds",
+        "cloudProvider.$": "$.Payload.cloudProvider"
       },
-      "Next": "CheckVulnerabilities",
+      "Next": "ProcessFindings",
       "Catch": [
         {
           "ErrorEquals": [
@@ -26,17 +28,6 @@
           "ResultPath": "$.error"
         }
       ]
-    },
-    "CheckVulnerabilities": {
-      "Type": "Choice",
-      "Choices": [
-        {
-          "Variable": "$.auditResult.vulnerabilitiesFound",
-          "BooleanEquals": true,
-          "Next": "ProcessFindings"
-        }
-      ],
-      "Default": "AuditComplete"
     },
     "ProcessFindings": {
       "Type": "Task",
@@ -49,7 +40,8 @@
           "httpMethod": "POST",
           "headers": {
             "Content-Type": "application/json",
-            "Host": "stepfunctions.internal"
+            "Host": "stepfunctions.internal",
+            "Idempotency-Key.$": "$$.Execution.Name"
           },
           "multiValueHeaders": {
             "Content-Type": [
@@ -77,7 +69,23 @@
         }
       },
       "ResultPath": "$.reporterResult",
-      "Next": "SendAlert",
+      "Next": "CheckVulnerabilities",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL",
+          "Comment": "Safe to retry: the execution name is sent as the Idempotency-Key, so a redelivered audit is stored once."
+        }
+      ],
       "Catch": [
         {
           "ErrorEquals": [
@@ -86,7 +94,20 @@
           "Next": "ReportingFailed",
           "ResultPath": "$.error"
         }
-      ]
+      ],
+      "Comment": "Every audit is recorded, clean ones included, so the dashboard and metrics show that a scan ran. Previously only audits with findings reached the reporter."
+    },
+    "CheckVulnerabilities": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.auditResult.vulnerabilitiesFound",
+          "BooleanEquals": true,
+          "Next": "SendAlert"
+        }
+      ],
+      "Default": "AuditComplete",
+      "Comment": "Alert only when something was found."
     },
     "SendAlert": {
       "Type": "Task",

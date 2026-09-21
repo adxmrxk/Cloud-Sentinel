@@ -16,18 +16,34 @@ Resources:
   SecurityAuditsTable:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: SecurityAudits
+      # No fixed TableName: CloudFormation generates a unique one and the
+      # reporter receives it through TABLE_NAME (!Ref below). A fixed
+      # "SecurityAudits" collided with the table the Terraform path creates
+      # and prevented a second stack in the same account and region.
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
         - AttributeName: auditId
           AttributeType: S
         - AttributeName: timestamp
           AttributeType: S
+        - AttributeName: recordType
+          AttributeType: S
       KeySchema:
         - AttributeName: auditId
           KeyType: HASH
         - AttributeName: timestamp
           KeyType: RANGE
+      # The dashboard reads the newest audits a page at a time from this
+      # index instead of scanning the table.
+      GlobalSecondaryIndexes:
+        - IndexName: byTimestamp
+          KeySchema:
+            - AttributeName: recordType
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
 
   #############################################
   # SQS Dead Letter Queue - Error Handling
@@ -84,6 +100,8 @@ Resources:
               Action:
                 - s3:ListAllMyBuckets
                 - s3:GetBucketPublicAccessBlock
+                - s3:GetBucketPolicy
+                - s3:GetBucketAcl
                 - s3:GetBucketLocation
               Resource: '*'
         - SQSSendMessagePolicy:
@@ -126,6 +144,10 @@ Resources:
           Properties:
             Path: /ingest
             Method: post
+            # Writes need SigV4-signed IAM credentials. Step Functions invokes
+            # the function directly, so it does not go through this route.
+            Auth:
+              Authorizer: AWS_IAM
 
   #############################################
   # Step Functions State Machine
@@ -165,7 +187,9 @@ Resources:
   EventBridgeRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: CloudSentinel-EventBridge-Role
+      # No fixed RoleName: IAM role names are unique regardless of case, so
+      # "CloudSentinel-EventBridge-Role" collided with Terraform's
+      # "cloudsentinel-eventbridge-role".
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:

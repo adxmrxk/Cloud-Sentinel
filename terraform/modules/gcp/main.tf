@@ -14,6 +14,14 @@ variable "gcp_project" {
   type = string
 }
 
+# Principals allowed to open the reporter dashboard, e.g.
+# ["group:security@example.com"]. The dashboard has no login of its own and
+# lists every exposed bucket, so it is never public.
+variable "reporter_invokers" {
+  type    = list(string)
+  default = []
+}
+
 #############################################
 # Enable Required APIs
 #############################################
@@ -59,6 +67,38 @@ resource "google_storage_bucket" "reports" {
   }
 
   uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  logging {
+    log_bucket = google_storage_bucket.access_logs.name
+  }
+
+  labels = {
+    project     = "cloudsentinel"
+    environment = var.environment
+  }
+}
+
+resource "google_storage_bucket" "access_logs" {
+  # checkov:skip=CKV_GCP_62:This is the access-log destination; logging it to itself would loop.
+  name                        = "cloudsentinel-access-logs-${var.gcp_project}"
+  location                    = var.gcp_region
+  force_destroy               = true
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+
+  versioning {
+    enabled = true
+  }
+
+  lifecycle_rule {
+    condition {
+      age = 365
+    }
+    action {
+      type = "Delete"
+    }
+  }
 
   labels = {
     project     = "cloudsentinel"
@@ -71,6 +111,7 @@ resource "google_storage_bucket" "reports" {
 #############################################
 
 resource "google_pubsub_topic" "security_alerts" {
+  # checkov:skip=CKV_GCP_83:Customer-managed encryption keys are an organisational key-management decision; Google-managed encryption at rest is on by default.
   name = "cloudsentinel-security-alerts"
 
   labels = {
@@ -79,6 +120,7 @@ resource "google_pubsub_topic" "security_alerts" {
 }
 
 resource "google_pubsub_topic" "audit_queue" {
+  # checkov:skip=CKV_GCP_83:Customer-managed encryption keys are an organisational key-management decision; Google-managed encryption at rest is on by default.
   name = "cloudsentinel-audit-queue"
 
   labels = {
@@ -99,6 +141,7 @@ resource "google_pubsub_subscription" "audit_subscription" {
 }
 
 resource "google_pubsub_topic" "audit_dlq" {
+  # checkov:skip=CKV_GCP_83:Customer-managed encryption keys are an organisational key-management decision; Google-managed encryption at rest is on by default.
   name = "cloudsentinel-audit-dlq"
 
   labels = {
@@ -123,7 +166,7 @@ resource "google_secret_manager_secret" "config" {
 }
 
 resource "google_secret_manager_secret_version" "config" {
-  secret      = google_secret_manager_secret.config.id
+  secret = google_secret_manager_secret.config.id
   secret_data = jsonencode({
     webhook_url = "https://hooks.slack.com/services/PLACEHOLDER"
     environment = var.environment
@@ -224,12 +267,15 @@ resource "google_cloud_run_service" "reporter" {
   depends_on = [google_project_service.services]
 }
 
-# Allow unauthenticated access to reporter (dashboard)
-resource "google_cloud_run_service_iam_member" "reporter_public" {
+# Dashboard access for named principals only. It used to be granted to
+# allUsers, publishing every at-risk bucket name to the internet.
+resource "google_cloud_run_service_iam_member" "reporter_invokers" {
+  for_each = toset(var.reporter_invokers)
+
   service  = google_cloud_run_service.reporter.name
   location = google_cloud_run_service.reporter.location
   role     = "roles/run.invoker"
-  member   = "allUsers"
+  member   = each.value
 }
 
 #############################################
