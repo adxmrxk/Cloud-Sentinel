@@ -51,7 +51,10 @@ output "k8s_namespace" {
   value       = var.deploy_to_kubernetes ? kubernetes_namespace.cloudsentinel[0].metadata[0].name : null
 }
 
+# Terraform does not own an endpoint for the dashboard: on AWS the SAM stack's
+# API Gateway serves it, on Kubernetes the Helm chart's Ingress does. This
+# output used to return URLs that nothing served.
 output "dashboard_url" {
-  description = "CloudSentinel dashboard URL"
-  value       = var.deploy_to_kubernetes ? "http://cloudsentinel.local" : (var.enable_aws ? module.aws[0].api_gateway_url : null)
+  description = "Where to find the CloudSentinel dashboard"
+  value       = var.deploy_to_kubernetes ? "Ingress host configured in the Helm values (ingress.hosts)" : "DashboardUrl output of the SAM stack (template.yaml)"
 }

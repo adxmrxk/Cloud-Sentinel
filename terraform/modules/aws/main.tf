@@ -14,6 +14,80 @@ variable "dynamodb_table" {
   type = string
 }
 
+# Terraform does not build the Lambda functions; the SAM template does
+# (template.yaml). The state machine invokes them by these names.
+variable "auditor_function_name" {
+  type    = string
+  default = "CloudSentinel-Auditor"
+}
+
+variable "reporter_function_name" {
+  type    = string
+  default = "CloudSentinel-Reporter"
+}
+
+data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
+
+locals {
+  account_id = data.aws_caller_identity.current.account_id
+  partition  = data.aws_partition.current.partition
+
+  auditor_function_arn  = "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${var.auditor_function_name}"
+  reporter_function_arn = "arn:${local.partition}:lambda:${var.aws_region}:${local.account_id}:function:${var.reporter_function_name}"
+}
+
+#############################################
+# KMS key for CloudSentinel data at rest
+# (DynamoDB, SNS, SQS, Secrets Manager, CloudWatch Logs)
+#############################################
+
+resource "aws_kms_key" "data" {
+  description             = "CloudSentinel data encryption (${var.environment})"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AccountAdministration"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:${local.partition}:iam::${local.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AwsServicesInThisAccount"
+        Effect    = "Allow"
+        Principal = { Service = ["sns.amazonaws.com", "sqs.amazonaws.com", "events.amazonaws.com", "states.amazonaws.com"] }
+        Action    = ["kms:Decrypt", "kms:GenerateDataKey*"]
+        Resource  = "*"
+        Condition = { StringEquals = { "aws:SourceAccount" = local.account_id } }
+      },
+      {
+        Sid       = "CloudWatchLogs"
+        Effect    = "Allow"
+        Principal = { Service = "logs.${var.aws_region}.amazonaws.com" }
+        Action    = ["kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
+        Resource  = "*"
+        Condition = {
+          ArnLike = { "kms:EncryptionContext:aws:logs:arn" = "arn:${local.partition}:logs:${var.aws_region}:${local.account_id}:*" }
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "CloudSentinel-Data-KMS"
+  }
+}
+
+resource "aws_kms_alias" "data" {
+  name          = "alias/cloudsentinel-data-${var.environment}"
+  target_key_id = aws_kms_key.data.key_id
+}
+
 #############################################
 # DynamoDB Table
 #############################################
@@ -50,6 +124,11 @@ resource "aws_dynamodb_table" "security_audits" {
     enabled = true
   }
 
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.data.arn
+  }
+
   tags = {
     Name = "CloudSentinel-SecurityAudits"
   }
@@ -62,6 +141,7 @@ resource "aws_dynamodb_table" "security_audits" {
 resource "aws_sqs_queue" "audit_dlq" {
   name                      = "cloudsentinel-audit-dlq"
   message_retention_seconds = 1209600 # 14 days
+  kms_master_key_id         = aws_kms_key.data.arn
 
   tags = {
     Name = "CloudSentinel-DLQ"
@@ -72,6 +152,7 @@ resource "aws_sqs_queue" "audit_queue" {
   name                       = "cloudsentinel-audit-queue"
   visibility_timeout_seconds = 60
   message_retention_seconds  = 86400
+  kms_master_key_id          = aws_kms_key.data.arn
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.audit_dlq.arn
@@ -88,8 +169,9 @@ resource "aws_sqs_queue" "audit_queue" {
 #############################################
 
 resource "aws_sns_topic" "security_alerts" {
-  name         = "cloudsentinel-security-alerts"
-  display_name = "CloudSentinel Security Alerts"
+  name              = "cloudsentinel-security-alerts"
+  display_name      = "CloudSentinel Security Alerts"
+  kms_master_key_id = aws_kms_key.data.arn
 
   tags = {
     Name = "CloudSentinel-Alerts"
@@ -101,8 +183,10 @@ resource "aws_sns_topic" "security_alerts" {
 #############################################
 
 resource "aws_secretsmanager_secret" "config" {
+  # checkov:skip=CKV2_AWS_57:The secret holds a Slack incoming-webhook URL. Slack issues it and offers no API to rotate it, so a rotation function would have nothing to call.
   name        = "cloudsentinel/config"
   description = "CloudSentinel configuration"
+  kms_key_id  = aws_kms_key.data.arn
 
   tags = {
     Name = "CloudSentinel-Config"
@@ -125,6 +209,17 @@ resource "aws_kms_key" "reports" {
   description             = "KMS key for CloudSentinel reports bucket encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "AccountAdministration"
+      Effect    = "Allow"
+      Principal = { AWS = "arn:${local.partition}:iam::${local.account_id}:root" }
+      Action    = "kms:*"
+      Resource  = "*"
+    }]
+  })
 
   tags = {
     Name = "CloudSentinel-Reports-KMS"
@@ -152,6 +247,93 @@ resource "aws_s3_bucket" "reports" {
 
 resource "random_id" "bucket_suffix" {
   byte_length = 4
+}
+
+resource "aws_s3_bucket_logging" "reports" {
+  bucket        = aws_s3_bucket.reports.id
+  target_bucket = aws_s3_bucket.access_logs.id
+  target_prefix = "reports/"
+}
+
+# Destination for S3 server access logs.
+#tfsec:ignore:aws-s3-enable-bucket-logging This is the access-log destination; logging it to itself would loop.
+resource "aws_s3_bucket" "access_logs" {
+  # checkov:skip=CKV_AWS_18:This is the access-log destination; logging it to itself would loop.
+  # checkov:skip=CKV_AWS_144:Cross-region replication of access logs is not required for this project.
+  # checkov:skip=CKV2_AWS_62:No consumers subscribe to access-log object events.
+  # checkov:skip=CKV_AWS_145:S3 server access logging only supports SSE-S3 destination buckets, not SSE-KMS.
+  bucket = "cloudsentinel-access-logs-${var.environment}-${random_id.bucket_suffix.hex}"
+
+  tags = {
+    Name = "CloudSentinel-AccessLogs"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+#tfsec:ignore:aws-s3-encryption-customer-key S3 server access logging only supports SSE-S3 destination buckets, not SSE-KMS.
+resource "aws_s3_bucket_server_side_encryption_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  rule {
+    id     = "expire-access-logs"
+    status = "Enabled"
+
+    filter {}
+
+    expiration {
+      days = 365
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "S3ServerAccessLogsPolicy"
+      Effect    = "Allow"
+      Principal = { Service = "logging.s3.amazonaws.com" }
+      Action    = "s3:PutObject"
+      Resource  = "${aws_s3_bucket.access_logs.arn}/*"
+      Condition = {
+        ArnLike      = { "aws:SourceArn" = aws_s3_bucket.reports.arn }
+        StringEquals = { "aws:SourceAccount" = local.account_id }
+      }
+    }]
+  })
 }
 
 resource "aws_s3_bucket_versioning" "reports" {
@@ -241,70 +423,36 @@ resource "aws_iam_role" "auditor" {
 }
 
 resource "aws_iam_role_policy" "auditor" {
+  # checkov:skip=CKV_AWS_355:s3:ListAllMyBuckets has no resource-level permissions; AWS only accepts "*" for it. Every other action is scoped.
   name = "cloudsentinel-auditor-policy"
   role = aws_iam_role.auditor.id
 
+  # Exactly the calls Function.cs makes. The previous policy also granted
+  # EC2, IAM, RDS and Lambda read access that no code used.
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "s3:ListAllMyBuckets",
-          "s3:GetBucketPublicAccessBlock",
-          "s3:GetBucketLocation",
-          "s3:GetBucketEncryption",
-          "s3:GetBucketVersioning"
-        ]
+        Sid      = "ListBuckets"
+        Effect   = "Allow"
+        Action   = "s3:ListAllMyBuckets"
         Resource = "*"
       },
       {
-        Effect = "Allow"
-        Action = [
-          "ec2:DescribeInstances",
-          "ec2:DescribeSecurityGroups",
-          "ec2:DescribeVolumes",
-          "ec2:DescribeVpcs",
-          "ec2:DescribeSubnets"
-        ]
-        Resource = "*"
+        Sid      = "ReadPublicAccessBlock"
+        Effect   = "Allow"
+        Action   = "s3:GetBucketPublicAccessBlock"
+        Resource = "arn:${local.partition}:s3:::*"
       },
       {
-        Effect = "Allow"
-        Action = [
-          "iam:ListUsers",
-          "iam:ListRoles",
-          "iam:ListPolicies",
-          "iam:GetAccountPasswordPolicy",
-          "iam:ListMFADevices",
-          "iam:ListAccessKeys"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "rds:DescribeDBInstances",
-          "rds:DescribeDBClusters"
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "lambda:ListFunctions",
-          "lambda:GetFunctionConfiguration"
-        ]
-        Resource = "*"
-      },
-      {
+        Sid    = "Logs"
         Effect = "Allow"
         Action = [
           "logs:CreateLogGroup",
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "arn:aws:logs:*:*:*"
+        Resource = "arn:${local.partition}:logs:${var.aws_region}:${local.account_id}:log-group:/aws/lambda/${var.auditor_function_name}:*"
       }
     ]
   })
@@ -314,72 +462,34 @@ resource "aws_iam_role_policy" "auditor" {
 # Step Functions
 #############################################
 
+resource "aws_cloudwatch_log_group" "audit_workflow" {
+  name              = "/aws/vendedlogs/states/cloudsentinel-audit-workflow"
+  retention_in_days = 365
+  kms_key_id        = aws_kms_key.data.arn
+}
+
 resource "aws_sfn_state_machine" "audit_workflow" {
   name     = "cloudsentinel-audit-workflow"
   role_arn = aws_iam_role.step_functions.arn
 
-  definition = jsonencode({
-    Comment = "CloudSentinel Multi-Cloud Audit Workflow"
-    StartAt = "ParallelAudit"
-    States = {
-      ParallelAudit = {
-        Type = "Parallel"
-        Branches = [
-          {
-            StartAt = "AuditAWS"
-            States = {
-              AuditAWS = {
-                Type     = "Task"
-                Resource = "arn:aws:states:::lambda:invoke"
-                Parameters = {
-                  FunctionName = "cloudsentinel-auditor"
-                  Payload = {
-                    "cloud"    = "aws"
-                    "input.$"  = "$"
-                  }
-                }
-                End = true
-              }
-            }
-          }
-        ]
-        Next = "ProcessResults"
-      }
-      ProcessResults = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::lambda:invoke"
-        Parameters = {
-          FunctionName = "cloudsentinel-reporter"
-          Payload = {
-            "results.$" = "$"
-          }
-        }
-        Next = "CheckFindings"
-      }
-      CheckFindings = {
-        Type = "Choice"
-        Choices = [{
-          Variable      = "$.Payload.vulnerabilitiesFound"
-          BooleanEquals = true
-          Next          = "SendAlert"
-        }]
-        Default = "AuditComplete"
-      }
-      SendAlert = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::sns:publish"
-        Parameters = {
-          TopicArn = aws_sns_topic.security_alerts.arn
-          Subject  = "CloudSentinel: Security Issues Detected"
-          "Message.$" = "$.Payload.summary"
-        }
-        Next = "AuditComplete"
-      }
-      AuditComplete = {
-        Type = "Succeed"
-      }
-    }
+  # The same definition the SAM template deploys. This module used to carry
+  # its own inline copy that invoked functions Terraform never creates and
+  # sent the reporter a payload it could not route.
+  definition = templatefile("${path.module}/../../../statemachine/audit-workflow.asl.json", {
+    AuditorFunctionArn     = local.auditor_function_arn
+    ReporterFunctionArn    = local.reporter_function_arn
+    SecurityAlertsTopicArn = aws_sns_topic.security_alerts.arn
   })
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.audit_workflow.arn}:*"
+    include_execution_data = true
+    level                  = "ERROR"
+  }
+
+  tracing_configuration {
+    enabled = true
+  }
 }
 
 resource "aws_iam_role" "step_functions" {
@@ -397,6 +507,45 @@ resource "aws_iam_role" "step_functions" {
   })
 }
 
+# Log delivery and X-Ray APIs have no resource-level permissions.
+#tfsec:ignore:aws-iam-no-policy-wildcards CloudWatch Logs delivery and X-Ray actions only accept "*" as the resource.
+resource "aws_iam_role_policy" "step_functions_observability" {
+  # checkov:skip=CKV_AWS_355:CloudWatch Logs delivery and X-Ray actions only accept "*" as the resource.
+  # checkov:skip=CKV_AWS_290:CloudWatch Logs delivery and X-Ray actions only accept "*" as the resource.
+  name = "cloudsentinel-stepfunctions-observability"
+  role = aws_iam_role.step_functions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogDelivery",
+          "logs:GetLogDelivery",
+          "logs:UpdateLogDelivery",
+          "logs:DeleteLogDelivery",
+          "logs:ListLogDeliveries",
+          "logs:PutResourcePolicy",
+          "logs:DescribeResourcePolicies",
+          "logs:DescribeLogGroups"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "step_functions" {
   name = "cloudsentinel-stepfunctions-policy"
   role = aws_iam_role.step_functions.id
@@ -407,12 +556,17 @@ resource "aws_iam_role_policy" "step_functions" {
       {
         Effect   = "Allow"
         Action   = "lambda:InvokeFunction"
-        Resource = "*"
+        Resource = [local.auditor_function_arn, local.reporter_function_arn]
       },
       {
         Effect   = "Allow"
         Action   = "sns:Publish"
         Resource = aws_sns_topic.security_alerts.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:GenerateDataKey"]
+        Resource = aws_kms_key.data.arn
       }
     ]
   })
@@ -483,6 +637,6 @@ output "step_function_arn" {
   value = aws_sfn_state_machine.audit_workflow.arn
 }
 
-output "api_gateway_url" {
-  value = "https://cloudsentinel.execute-api.${var.aws_region}.amazonaws.com/prod"
-}
+# The dashboard URL is the DashboardUrl output of the SAM stack
+# (template.yaml), which owns the API Gateway. This module used to output a
+# hard-coded URL here that pointed at nothing.

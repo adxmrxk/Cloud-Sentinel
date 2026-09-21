@@ -32,9 +32,11 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: reporter
-          image: ghcr.io/cloudsentinel/reporter:latest
+          image: ghcr.io/adxmrxk/cloudsentinel-reporter:latest
           imagePullPolicy: Always
           ports:
             - name: http

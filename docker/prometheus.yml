@@ -14,30 +14,27 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  # The jobs below are disabled because nothing serves the endpoints they
-  # scrape. Each was permanently DOWN: the two services return 404 (neither
-  # app is instrumented), and Redis/NGINX do not speak Prometheus at all.
-  # Re-enable each one only once its exporter or instrumentation exists.
-  #
-  # Needs prometheus_client instrumentation in reporter/app.py:
-  # - job_name: 'cloudsentinel-reporter'
-  #   static_configs:
-  #     - targets: ['reporter:8000']
-  #   metrics_path: '/metrics'
-  #
-  # Needs a metrics endpoint in the auditor (it is a Lambda, so this most
-  # likely belongs in CloudWatch rather than Prometheus):
-  # - job_name: 'cloudsentinel-auditor'
-  #   static_configs:
-  #     - targets: ['auditor:8080']
-  #   metrics_path: '/metrics'
-  #
-  # Needs a redis_exporter sidecar (Redis serves RESP, not HTTP):
-  # - job_name: 'redis'
-  #   static_configs:
-  #     - targets: ['redis-exporter:9121']
-  #
-  # Needs nginx-prometheus-exporter plus stub_status in nginx.conf:
-  # - job_name: 'nginx'
-  #   static_configs:
-  #     - targets: ['nginx-exporter:9113']
+  # Reporter: application metrics from prometheus_client (all gunicorn
+  # workers aggregated through PROMETHEUS_MULTIPROC_DIR).
+  - job_name: 'cloudsentinel-reporter'
+    static_configs:
+      - targets: ['reporter:8000']
+    metrics_path: '/metrics'
+
+  # The auditor is not scraped: it runs as a Lambda or a short-lived CronJob
+  # pod, so nothing is listening between runs. It reports each scan's
+  # duration and resource count to the reporter instead, which exports them
+  # as cloudsentinel_scan_duration_seconds and
+  # cloudsentinel_resources_scanned_total.
+
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']

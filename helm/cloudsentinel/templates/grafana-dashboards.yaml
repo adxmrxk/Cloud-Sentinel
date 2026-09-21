@@ -1,0 +1,16 @@
+{{- if .Values.grafana.enabled }}
+{{- /*
+Dashboards for the grafana subchart. The name is fixed because the subchart's
+dashboardsConfigMaps value (values.yaml) cannot be templated. The JSON is the
+same file the Docker Compose stack provisions.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudsentinel-grafana-dashboards
+  labels:
+    {{- include "cloudsentinel.labels" . | nindent 4 }}
+data:
+  cloudsentinel.json: |-
+{{ .Files.Get "dashboards/cloudsentinel.json" | indent 4 }}
+{{- end }}

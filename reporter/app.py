@@ -3,41 +3,76 @@ CloudSentinel Reporter - Flask API for ingesting findings and serving dashboard
 """
 
 import json
+import logging
 import os
+import time
 import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from functools import lru_cache
 
 import boto3
 from asgiref.wsgi import WsgiToAsgi
+from botocore.config import Config
 from botocore.exceptions import ClientError
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, g, jsonify, render_template, request
 from mangum import Mangum
+
+import cache
+import findings_store
+import telemetry
+
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO").upper())
 
 app = Flask(__name__)
 
-TABLE_NAME = os.environ.get("TABLE_NAME", "SecurityAudits")
-SECRET_NAME = os.environ.get("SECRET_NAME", "CloudSentinel/Config")
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+DEFAULT_PROVIDER = "aws"
 
-DYNAMODB_ENDPOINT = os.environ.get("DYNAMODB_ENDPOINT") or None
-
-dynamodb = boto3.resource(
-    "dynamodb", region_name=AWS_REGION, endpoint_url=DYNAMODB_ENDPOINT
+# botocore defaults to a 60s connect timeout with retries, so an unreachable
+# DynamoDB made /ingest hang until gunicorn killed the worker - the client got
+# no response and the failure was never counted. Fail fast instead.
+AWS_CLIENT_CONFIG = Config(
+    connect_timeout=3,
+    read_timeout=10,
+    retries={"max_attempts": 3, "mode": "standard"},
 )
-secrets_client = boto3.client("secretsmanager", region_name=AWS_REGION)
-table = dynamodb.Table(TABLE_NAME)
+
+
+def _env(name, default=None):
+    return os.environ.get(name) or default
+
+
+@lru_cache(maxsize=1)
+def get_table():
+    """DynamoDB table, created lazily so configuration is read at first use."""
+    dynamodb = boto3.resource(
+        "dynamodb",
+        region_name=_env("AWS_REGION", "us-east-1"),
+        endpoint_url=_env("DYNAMODB_ENDPOINT"),
+        config=AWS_CLIENT_CONFIG,
+    )
+    return dynamodb.Table(_env("TABLE_NAME", "SecurityAudits"))
+
+
+@lru_cache(maxsize=1)
+def get_secrets_client():
+    return boto3.client(
+        "secretsmanager",
+        region_name=_env("AWS_REGION", "us-east-1"),
+        config=AWS_CLIENT_CONFIG,
+    )
 
 
 @lru_cache(maxsize=1)
 def get_secret():
     """Fetch webhook URL from Secrets Manager (cached)"""
     try:
-        response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
-        secret = json.loads(response["SecretString"])
-        return secret
+        response = get_secrets_client().get_secret_value(
+            SecretId=_env("SECRET_NAME", "CloudSentinel/Config")
+        )
+        return json.loads(response["SecretString"])
     except ClientError as e:
         app.logger.error(f"Failed to retrieve secret: {e}")
         return {"webhook_url": None}
@@ -63,6 +98,7 @@ def send_slack_alert(audit_id, at_risk_buckets, total_scanned):
     webhook_url = get_webhook_url()
     if not webhook_url:
         app.logger.info("No Slack webhook configured; skipping notification")
+        telemetry.NOTIFICATIONS.labels("slack", "skipped").inc()
         return False
 
     severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
@@ -118,36 +154,166 @@ def send_slack_alert(audit_id, at_risk_buckets, total_scanned):
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as response:
-            if 200 <= response.status < 300:
+            body = response.read().decode("utf-8", errors="replace").strip()
+            # Slack answers a delivered webhook message with the literal body
+            # "ok". A bare 2xx is not proof: proxies and captive portals return
+            # 200 for URLs that never reached Slack.
+            if 200 <= response.status < 300 and body == "ok":
                 app.logger.info(f"Slack notified for audit {audit_id}")
+                telemetry.NOTIFICATIONS.labels("slack", "sent").inc()
                 return True
-            app.logger.error(f"Slack webhook returned HTTP {response.status}")
-            return False
-    except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            app.logger.error(
+                f"Slack webhook returned HTTP {response.status}: {body[:100]!r}"
+            )
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
         app.logger.error(f"Slack webhook failed: {e}")
-        return False
+    telemetry.NOTIFICATIONS.labels("slack", "failed").inc()
+    return False
+
+
+def normalize_bucket(bucket):
+    """Accept both key styles.
+
+    The Lambda serializer and the CLI auditor emit camelCase (bucketName);
+    the README's example and existing stored audits use PascalCase
+    (BucketName). Storage and the dashboard use PascalCase.
+    """
+    normalized = {
+        "BucketName": bucket.get("BucketName") or bucket.get("bucketName") or "unknown",
+        "Severity": str(
+            bucket.get("Severity") or bucket.get("severity") or "LOW"
+        ).upper(),
+        "RiskFactors": list(
+            bucket.get("RiskFactors") or bucket.get("riskFactors") or []
+        ),
+    }
+    creation_date = bucket.get("CreationDate") or bucket.get("creationDate")
+    if creation_date:
+        normalized["CreationDate"] = creation_date
+    return normalized
+
+
+def severity_counts(at_risk_buckets):
+    counts = {s: 0 for s in telemetry.SEVERITIES}
+    for bucket in at_risk_buckets:
+        severity = str(bucket.get("Severity", "LOW")).upper()
+        counts[severity] = counts.get(severity, 0) + 1
+    return counts
+
+
+def record_metrics(provider, at_risk_buckets, total_scanned, scan_duration):
+    counts = severity_counts(at_risk_buckets)
+
+    telemetry.AUDITS.labels(
+        provider, "vulnerable" if at_risk_buckets else "clean"
+    ).inc()
+    telemetry.RESOURCES_SCANNED.labels(provider, "s3_bucket").inc(total_scanned)
+    for severity, count in counts.items():
+        telemetry.FINDINGS_BY_SEVERITY.labels(provider, severity).set(count)
+        if count:
+            telemetry.FINDINGS.labels(provider, severity).inc(count)
+    if scan_duration is not None:
+        telemetry.SCAN_DURATION.labels(provider).observe(scan_duration)
+
+
+_posture_restored = False
+
+
+def restore_posture_gauge():
+    """Rebuild the latest-audit gauge from stored audits once per process.
+
+    The gauge lives in process memory, so after a restart or deploy it would
+    read "No data" until the next audit arrives - up to a day later. Stored
+    audits are the source of truth, so restore it from the newest one per
+    provider. Retried on the next scrape if storage is unreachable.
+    """
+    global _posture_restored
+    if _posture_restored:
+        return
+    try:
+        audits = load_audits()
+    except Exception as e:
+        app.logger.warning(f"Could not restore posture metrics: {e}")
+        return
+
+    latest = {}
+    for audit in audits:  # newest first
+        latest.setdefault(audit.get("cloudProvider") or DEFAULT_PROVIDER, audit)
+    for provider, audit in latest.items():
+        counts = severity_counts(audit.get("atRiskBuckets") or [])
+        for severity, count in counts.items():
+            telemetry.FINDINGS_BY_SEVERITY.labels(provider, severity).set(count)
+    _posture_restored = True
+
+
+def load_audits():
+    """All audits, newest first. Served from Redis when cached."""
+    cached = cache.get_json(cache.AUDITS_KEY)
+    if cached is not None:
+        return cached
+
+    table = get_table()
+    audits = []
+    response = table.scan()
+    audits.extend(response.get("Items", []))
+    while "LastEvaluatedKey" in response:
+        response = table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+        audits.extend(response.get("Items", []))
+
+    audits.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    cache.set_json(cache.AUDITS_KEY, audits)
+    return audits
+
+
+@app.before_request
+def _start_timer():
+    g.request_started = time.perf_counter()
+
+
+@app.after_request
+def _record_request(response):
+    endpoint = request.url_rule.rule if request.url_rule else "unmatched"
+    if endpoint != "/metrics":
+        telemetry.API_REQUESTS.labels(
+            request.method, endpoint, str(response.status_code)
+        ).inc()
+        started = getattr(g, "request_started", None)
+        if started is not None:
+            telemetry.API_LATENCY.labels(request.method, endpoint).observe(
+                time.perf_counter() - started
+            )
+    return response
 
 
 @app.route("/ingest", methods=["POST"])
 def ingest_findings():
     """
     POST /ingest
-    Receives audit findings from Step Functions, stores them in DynamoDB,
+    Receives audit findings from Step Functions or the CLI auditor, stores
+    them in DynamoDB (and PostgreSQL when configured), refreshes the cache,
     and posts an alert to Slack if any vulnerabilities were found.
     """
-    try:
-        if request.is_json:
-            data = request.get_json()
-        else:
-            body = request.data.decode("utf-8")
-            data = json.loads(body) if body else {}
+    data = request.get_json(force=True, silent=True)
+    if not isinstance(data, dict):
+        return (
+            jsonify({"status": "error", "message": "Body must be a JSON object"}),
+            400,
+        )
 
+    provider = str(data.get("cloudProvider") or DEFAULT_PROVIDER).lower()
+
+    try:
         audit_id = str(uuid.uuid4())
         timestamp = datetime.utcnow().isoformat()
 
-        at_risk_buckets = data.get("atRiskBuckets", [])
-        vulnerabilities_found = data.get("vulnerabilitiesFound", False)
-        total_scanned = data.get("totalBucketsScanned", 0)
+        at_risk_buckets = [
+            normalize_bucket(b) for b in data.get("atRiskBuckets", []) or []
+        ]
+        vulnerabilities_found = bool(data.get("vulnerabilitiesFound", False))
+        total_scanned = int(data.get("totalBucketsScanned", 0) or 0)
+        audit_timestamp = data.get("auditTimestamp", timestamp)
+        scan_duration = data.get("scanDurationSeconds")
+        scan_duration = float(scan_duration) if scan_duration is not None else None
 
         slack_sent = False
         if vulnerabilities_found and at_risk_buckets:
@@ -156,15 +322,34 @@ def ingest_findings():
         item = {
             "auditId": audit_id,
             "timestamp": timestamp,
+            "cloudProvider": provider,
             "vulnerabilitiesFound": vulnerabilities_found,
             "totalBucketsScanned": total_scanned,
             "atRiskBuckets": at_risk_buckets,
-            "auditTimestamp": data.get("auditTimestamp", timestamp),
+            "auditTimestamp": audit_timestamp,
             "status": "PROCESSED",
             "slackNotified": slack_sent,
         }
+        if scan_duration is not None:
+            # DynamoDB rejects Python floats; numbers must be Decimal.
+            item["scanDurationSeconds"] = Decimal(str(scan_duration))
 
-        table.put_item(Item=item)
+        get_table().put_item(Item=item)
+        cache.delete(cache.AUDITS_KEY)
+
+        findings_indexed = False
+        if findings_store.enabled():
+            try:
+                findings_store.record_findings(
+                    audit_id, provider, audit_timestamp, at_risk_buckets
+                )
+                findings_indexed = True
+                telemetry.FINDINGS_STORE_WRITES.labels("ok").inc()
+            except Exception as e:
+                telemetry.FINDINGS_STORE_WRITES.labels("error").inc()
+                app.logger.error(f"Findings store write failed: {e}")
+
+        record_metrics(provider, at_risk_buckets, total_scanned, scan_duration)
 
         app.logger.info(f"Stored audit {audit_id} with {len(at_risk_buckets)} findings")
 
@@ -175,6 +360,7 @@ def ingest_findings():
                     "auditId": audit_id,
                     "findingsCount": len(at_risk_buckets),
                     "slackNotified": slack_sent,
+                    "findingsIndexed": findings_indexed,
                     "message": "Findings ingested successfully",
                 }
             ),
@@ -182,6 +368,7 @@ def ingest_findings():
         )
 
     except Exception as e:
+        telemetry.INGEST_ERRORS.labels(provider).inc()
         app.logger.error(f"Ingestion error: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -193,27 +380,88 @@ def dashboard():
     Renders HTML dashboard with all audit findings from DynamoDB
     """
     try:
-        audits = []
-        response = table.scan()
-        audits.extend(response.get("Items", []))
-
-        while "LastEvaluatedKey" in response:
-            response = table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
-            audits.extend(response.get("Items", []))
-
-        audits.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-
-        return render_template("dashboard.html", audits=audits)
-
+        audits = load_audits()
     except Exception as e:
         app.logger.error(f"Dashboard error: {str(e)}")
         return f"<h1>Error</h1><p>{str(e)}</p>", 500
+
+    top_resources = []
+    if findings_store.enabled():
+        try:
+            top_resources = findings_store.summary(top=5)["topResources"]
+        except Exception as e:
+            app.logger.error(f"Findings store summary failed: {e}")
+
+    return render_template("dashboard.html", audits=audits, top_resources=top_resources)
+
+
+def _findings_store_unavailable():
+    return (
+        jsonify(
+            {
+                "status": "error",
+                "message": "Findings store is not configured (set DATABASE_URL)",
+            }
+        ),
+        503,
+    )
+
+
+@app.route("/api/findings", methods=["GET"])
+def list_findings():
+    """
+    GET /api/findings?severity=CRITICAL&resource=my-bucket&provider=aws&limit=100
+    Individual findings across all audits, newest first.
+    """
+    if not findings_store.enabled():
+        return _findings_store_unavailable()
+    try:
+        limit = int(request.args.get("limit", 100))
+    except ValueError:
+        return jsonify({"status": "error", "message": "limit must be an integer"}), 400
+    try:
+        findings = findings_store.query_findings(
+            severity=request.args.get("severity"),
+            resource=request.args.get("resource"),
+            provider=request.args.get("provider"),
+            limit=limit,
+        )
+    except Exception as e:
+        app.logger.error(f"Findings query failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify({"findings": findings, "count": len(findings)})
+
+
+@app.route("/api/findings/summary", methods=["GET"])
+def findings_summary():
+    """
+    GET /api/findings/summary
+    Finding counts by severity and the resources flagged most often.
+    """
+    if not findings_store.enabled():
+        return _findings_store_unavailable()
+    try:
+        return jsonify(findings_store.summary())
+    except Exception as e:
+        app.logger.error(f"Findings summary failed: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/metrics", methods=["GET"])
+def metrics():
+    """Prometheus scrape endpoint"""
+    restore_posture_gauge()
+    body, content_type = telemetry.metrics_payload()
+    return Response(body, mimetype=content_type)
 
 
 @app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint"""
     return jsonify({"status": "healthy", "service": "CloudSentinel-Reporter"})
+
+
+telemetry.init_tracing(app)
 
 
 class EnsureContentLength:

@@ -92,6 +92,9 @@
         .severity-high { color: #fb923c; font-weight: 600; }
         .severity-medium { color: #fbbf24; font-weight: 600; }
         .severity-low { color: #4ade80; font-weight: 600; }
+        .section-title { font-size: 1.25rem; color: #cbd5e1; margin-bottom: 0.25rem; }
+        .section-subtitle { margin-bottom: 1rem; }
+        .section-gap { margin-bottom: 2rem; }
     </style>
 </head>
 <body>
@@ -148,6 +151,35 @@
                 <div class="stat-label">Audits with Issues</div>
             </div>
         </div>
+
+        {% if top_resources %}
+        <h2 class="section-title">Repeat Offenders</h2>
+        <p class="subtitle section-subtitle">Resources flagged most often across all audits (PostgreSQL findings store)</p>
+        <div class="table-container section-gap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Resource</th>
+                        <th>Provider</th>
+                        <th>Audits Flagged</th>
+                        <th>Worst Severity</th>
+                        <th>Last Seen</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for r in top_resources %}
+                    <tr>
+                        <td><strong>{{ r.resourceName }}</strong></td>
+                        <td>{{ r.cloudProvider | upper }}</td>
+                        <td>{{ r.occurrences }}</td>
+                        <td><span class="severity-{{ r.worstSeverity | lower }}">{{ r.worstSeverity }}</span></td>
+                        <td class="timestamp">{{ r.lastSeen }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
 
         {% if audits %}
         <div class="table-container">

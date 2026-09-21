@@ -1,9 +1,11 @@
+using System.Diagnostics;
 using Amazon.Lambda.Core;
 using Amazon.S3;
 using Amazon.S3.Model;
-using System.Text.Json;
 
-[assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.DefaultLambdaJsonSerializer))]
+// camelCase output is required by the Step Functions definition, which reads
+// $.Payload.vulnerabilitiesFound etc. The default serializer keeps PascalCase.
+[assembly: LambdaSerializer(typeof(Amazon.Lambda.Serialization.SystemTextJson.CamelCaseLambdaJsonSerializer))]
 
 namespace Auditor;
 
@@ -12,11 +14,15 @@ namespace Auditor;
 /// </summary>
 public class Function
 {
+    public const string CloudProvider = "aws";
+
+    /// <summary>Source for trace spans; a no-op unless a tracer provider listens.</summary>
+    public static readonly ActivitySource Tracing = new("CloudSentinel.Auditor");
+
     private readonly IAmazonS3 _s3Client;
 
-    public Function()
+    public Function() : this(Program.CreateS3Client())
     {
-        _s3Client = new AmazonS3Client();
     }
 
     public Function(IAmazonS3 s3Client)
@@ -24,89 +30,118 @@ public class Function
         _s3Client = s3Client;
     }
 
-    public async Task<AuditResponse> FunctionHandler(object input, ILambdaContext context)
+    /// <summary>Lambda entry point, invoked by Step Functions.</summary>
+    public Task<AuditResponse> FunctionHandler(object input, ILambdaContext context)
     {
-        context.Logger.LogInformation("CloudSentinel Auditor: Starting S3 bucket security scan");
+        return RunAuditAsync(new LambdaAuditLog(context.Logger));
+    }
+
+    /// <summary>Runs one full scan of every bucket visible to the credentials.</summary>
+    public async Task<AuditResponse> RunAuditAsync(IAuditLog log)
+    {
+        using var auditSpan = Tracing.StartActivity("s3.audit");
+        var stopwatch = Stopwatch.StartNew();
+
+        log.Info("CloudSentinel Auditor: Starting S3 bucket security scan");
 
         var atRiskBuckets = new List<BucketRiskInfo>();
         var auditTimestamp = DateTime.UtcNow.ToString("o");
-        int totalBucketsScanned = 0;
+        int totalBucketsScanned;
 
         try
         {
             var listBucketsResponse = await _s3Client.ListBucketsAsync();
-            totalBucketsScanned = listBucketsResponse.Buckets.Count;
+            var buckets = listBucketsResponse.Buckets ?? new List<S3Bucket>();
+            totalBucketsScanned = buckets.Count;
 
-            context.Logger.LogInformation($"Found {totalBucketsScanned} buckets to scan");
+            log.Info($"Found {totalBucketsScanned} buckets to scan");
 
-            foreach (var bucket in listBucketsResponse.Buckets)
+            foreach (var bucket in buckets)
             {
-                try
+                var finding = await ScanBucketAsync(bucket, log);
+                if (finding != null)
                 {
-                    var publicAccessRequest = new GetPublicAccessBlockRequest
-                    {
-                        BucketName = bucket.BucketName
-                    };
-
-                    var publicAccessResponse = await _s3Client.GetPublicAccessBlockAsync(publicAccessRequest);
-                    var config = publicAccessResponse.PublicAccessBlockConfiguration;
-
-                    bool isAtRisk = !config.BlockPublicAcls ||
-                                    !config.IgnorePublicAcls ||
-                                    !config.BlockPublicPolicy ||
-                                    !config.RestrictPublicBuckets;
-
-                    if (isAtRisk)
-                    {
-                        atRiskBuckets.Add(new BucketRiskInfo
-                        {
-                            BucketName = bucket.BucketName,
-                            CreationDate = bucket.CreationDate.ToString("o"),
-                            RiskFactors = GetRiskFactors(config),
-                            Severity = CalculateSeverity(config)
-                        });
-
-                        context.Logger.LogWarning($"AT RISK: {bucket.BucketName}");
-                    }
-                }
-                catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchPublicAccessBlockConfiguration")
-                {
-                    atRiskBuckets.Add(new BucketRiskInfo
-                    {
-                        BucketName = bucket.BucketName,
-                        CreationDate = bucket.CreationDate.ToString("o"),
-                        RiskFactors = new List<string> { "NO_PUBLIC_ACCESS_BLOCK_CONFIGURED" },
-                        Severity = "CRITICAL"
-                    });
-
-                    context.Logger.LogWarning($"CRITICAL: {bucket.BucketName} has no public access block");
-                }
-                catch (AmazonS3Exception ex)
-                {
-                    context.Logger.LogError($"Error scanning bucket {bucket.BucketName}: {ex.Message}");
+                    atRiskBuckets.Add(finding);
                 }
             }
         }
         catch (Exception ex)
         {
-            context.Logger.LogError($"Fatal error during audit: {ex.Message}");
+            auditSpan?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            log.Error($"Fatal error during audit: {ex.Message}");
             throw;
         }
+
+        stopwatch.Stop();
 
         var response = new AuditResponse
         {
             VulnerabilitiesFound = atRiskBuckets.Count > 0,
             AtRiskBuckets = atRiskBuckets,
             TotalBucketsScanned = totalBucketsScanned,
-            AuditTimestamp = auditTimestamp
+            AuditTimestamp = auditTimestamp,
+            ScanDurationSeconds = Math.Round(stopwatch.Elapsed.TotalSeconds, 3),
+            CloudProvider = CloudProvider
         };
 
-        context.Logger.LogInformation($"Audit complete: {atRiskBuckets.Count}/{totalBucketsScanned} buckets at risk");
+        auditSpan?.SetTag("cloudsentinel.buckets_scanned", totalBucketsScanned);
+        auditSpan?.SetTag("cloudsentinel.buckets_at_risk", atRiskBuckets.Count);
+
+        log.Info($"Audit complete: {atRiskBuckets.Count}/{totalBucketsScanned} buckets at risk");
 
         return response;
     }
 
-    private static List<string> GetRiskFactors(PublicAccessBlockConfiguration config)
+    private async Task<BucketRiskInfo?> ScanBucketAsync(S3Bucket bucket, IAuditLog log)
+    {
+        using var span = Tracing.StartActivity("s3.GetPublicAccessBlock");
+        span?.SetTag("aws.s3.bucket", bucket.BucketName);
+
+        try
+        {
+            var publicAccessResponse = await _s3Client.GetPublicAccessBlockAsync(
+                new GetPublicAccessBlockRequest { BucketName = bucket.BucketName });
+            var config = publicAccessResponse.PublicAccessBlockConfiguration;
+
+            bool isAtRisk = !config.BlockPublicAcls ||
+                            !config.IgnorePublicAcls ||
+                            !config.BlockPublicPolicy ||
+                            !config.RestrictPublicBuckets;
+
+            if (!isAtRisk)
+            {
+                return null;
+            }
+
+            log.Warn($"AT RISK: {bucket.BucketName}");
+            return new BucketRiskInfo
+            {
+                BucketName = bucket.BucketName,
+                CreationDate = bucket.CreationDate.ToString("o"),
+                RiskFactors = GetRiskFactors(config),
+                Severity = CalculateSeverity(config)
+            };
+        }
+        catch (AmazonS3Exception ex) when (ex.ErrorCode == "NoSuchPublicAccessBlockConfiguration")
+        {
+            log.Warn($"CRITICAL: {bucket.BucketName} has no public access block");
+            return new BucketRiskInfo
+            {
+                BucketName = bucket.BucketName,
+                CreationDate = bucket.CreationDate.ToString("o"),
+                RiskFactors = new List<string> { "NO_PUBLIC_ACCESS_BLOCK_CONFIGURED" },
+                Severity = "CRITICAL"
+            };
+        }
+        catch (AmazonS3Exception ex)
+        {
+            span?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            log.Error($"Error scanning bucket {bucket.BucketName}: {ex.Message}");
+            return null;
+        }
+    }
+
+    internal static List<string> GetRiskFactors(PublicAccessBlockConfiguration config)
     {
         var factors = new List<string>();
 
@@ -118,7 +153,7 @@ public class Function
         return factors;
     }
 
-    private static string CalculateSeverity(PublicAccessBlockConfiguration config)
+    internal static string CalculateSeverity(PublicAccessBlockConfiguration config)
     {
         int disabledCount = 0;
         if (!config.BlockPublicAcls) disabledCount++;
@@ -142,6 +177,8 @@ public class AuditResponse
     public List<BucketRiskInfo> AtRiskBuckets { get; set; } = new();
     public int TotalBucketsScanned { get; set; }
     public string AuditTimestamp { get; set; } = string.Empty;
+    public double ScanDurationSeconds { get; set; }
+    public string CloudProvider { get; set; } = Function.CloudProvider;
 }
 
 public class BucketRiskInfo

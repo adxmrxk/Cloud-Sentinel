@@ -56,6 +56,10 @@ provider "aws" {
 }
 
 provider "azurerm" {
+  # Storage data-plane calls use Entra ID because the storage account
+  # disables shared-key authorization.
+  storage_use_azuread = true
+
   features {
     resource_group {
       prevent_deletion_if_contains_resources = false
@@ -130,9 +134,13 @@ resource "kubernetes_namespace" "cloudsentinel" {
 resource "helm_release" "cloudsentinel" {
   count = var.deploy_to_kubernetes ? 1 : 0
 
-  name       = "cloudsentinel"
-  namespace  = kubernetes_namespace.cloudsentinel[0].metadata[0].name
-  chart      = "../helm/cloudsentinel"
+  name      = "cloudsentinel"
+  namespace = kubernetes_namespace.cloudsentinel[0].metadata[0].name
+  chart     = "../helm/cloudsentinel"
+
+  # The chart's subcharts (redis, grafana, prometheus) are pinned in
+  # Chart.lock but their archives are not committed.
+  dependency_update = true
 
   values = [
     templatefile("${path.module}/helm-values.yaml", {

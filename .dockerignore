@@ -1,0 +1,19 @@
+# Local build outputs must never enter an image: a host obj/project.assets.json
+# restored without a runtime identifier breaks `dotnet publish -r linux-x64`.
+**/bin/
+**/obj/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+.coverage
+coverage.xml
+
+.git/
+.github/
+.claude/
+.env
+terraform/
+helm/
+k8s/
+tests/
+reporter/tests/

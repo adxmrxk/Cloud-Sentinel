@@ -6,35 +6,28 @@ global:
   imagePullSecrets: []
 
 # Auditor Configuration
+# Runs as the CronJob configured under `cronjob:` below, not as a Deployment.
 auditor:
   enabled: true
-  replicaCount: 2
   image:
-    repository: ghcr.io/cloudsentinel/auditor
+    repository: ghcr.io/adxmrxk/cloudsentinel-auditor
     tag: latest
     pullPolicy: Always
   resources:
     requests:
-      cpu: 100m
+      cpu: 200m
       memory: 256Mi
     limits:
-      cpu: 500m
+      cpu: 1000m
       memory: 512Mi
-  autoscaling:
-    enabled: true
-    minReplicas: 1
-    maxReplicas: 5
-    targetCPUUtilizationPercentage: 70
-  env:
-    CLOUD_PROVIDER: "multi"
-    LOG_LEVEL: "INFO"
+  env: {}
 
 # Reporter Configuration
 reporter:
   enabled: true
   replicaCount: 3
   image:
-    repository: ghcr.io/cloudsentinel/reporter
+    repository: ghcr.io/adxmrxk/cloudsentinel-reporter
     tag: latest
     pullPolicy: Always
   service:
@@ -55,6 +48,7 @@ reporter:
   env:
     FLASK_ENV: "production"
     LOG_LEVEL: "INFO"
+    TABLE_NAME: "SecurityAudits"
 
 # Ingress Configuration
 ingress:
@@ -74,15 +68,43 @@ ingress:
       hosts:
         - cloudsentinel.example.com
 
-# Redis Configuration
+# Redis Configuration (dashboard cache)
 redis:
   enabled: true
   architecture: standalone
   auth:
     enabled: false
+  # Bitnami stopped publishing these tags under docker.io/bitnami in 2025;
+  # the same images remain available from bitnamilegacy.
+  image:
+    repository: bitnamilegacy/redis
   master:
     persistence:
       size: 1Gi
+
+# PostgreSQL findings store (templates/postgres.yaml)
+postgres:
+  enabled: true
+  image:
+    repository: postgres
+    tag: 15-alpine
+  user: cloudsentinel
+  database: cloudsentinel
+  # Leave empty to generate one on first install and keep it on upgrades.
+  password: ""
+  storage: 2Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# OpenTelemetry: OTLP/HTTP collector for traces, e.g.
+# http://jaeger-collector.observability:4318. Empty disables tracing.
+tracing:
+  otlpEndpoint: ""
 
 # Grafana Configuration
 grafana:
@@ -100,6 +122,19 @@ grafana:
           type: file
           options:
             path: /var/lib/grafana/dashboards/default
+  # Rendered by templates/grafana-dashboards.yaml
+  dashboardsConfigMaps:
+    default: cloudsentinel-grafana-dashboards
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          uid: prometheus
+          type: prometheus
+          access: proxy
+          url: http://{{ .Release.Name }}-prometheus-server
+          isDefault: true
 
 # Prometheus Configuration
 prometheus:
@@ -113,6 +148,8 @@ cronjob:
   enabled: true
   schedule: "0 0 * * *"  # Daily at midnight
   concurrencyPolicy: Forbid
+  backoffLimit: 3
+  activeDeadlineSeconds: 1800
 
 # Cloud Provider Configuration
 cloudProviders:
@@ -143,7 +180,10 @@ serviceAccount:
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
+  runAsGroup: 1000
   fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false

@@ -14,7 +14,9 @@
         "vulnerabilitiesFound.$": "$.Payload.vulnerabilitiesFound",
         "atRiskBuckets.$": "$.Payload.atRiskBuckets",
         "totalBucketsScanned.$": "$.Payload.totalBucketsScanned",
-        "auditTimestamp.$": "$.Payload.auditTimestamp"
+        "auditTimestamp.$": "$.Payload.auditTimestamp",
+        "scanDurationSeconds.$": "$.Payload.scanDurationSeconds",
+        "cloudProvider.$": "$.Payload.cloudProvider"
       },
       "Next": "CheckVulnerabilities",
       "Catch": [

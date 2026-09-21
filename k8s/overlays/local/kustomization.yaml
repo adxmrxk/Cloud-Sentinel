@@ -1,0 +1,72 @@
+# Runs the base manifests on a local cluster (kind, minikube, Docker Desktop)
+# with no AWS account: DynamoDB Local replaces DynamoDB and a moto S3 mock,
+# seeded with demo buckets, replaces S3. Used by the CI k8s-e2e job.
+#
+#   docker build -f docker/Dockerfile.reporter -t cloudsentinel-reporter:local .
+#   docker build -f docker/Dockerfile.auditor  -t cloudsentinel-auditor:local .
+#   kind load docker-image cloudsentinel-reporter:local cloudsentinel-auditor:local
+#   kubectl apply -k k8s/overlays/local
+#   kubectl -n cloudsentinel create job audit-now --from=cronjob/cloudsentinel-audit
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: cloudsentinel
+
+resources:
+  - ../../base
+  - aws-mocks.yaml
+
+images:
+  - name: ghcr.io/adxmrxk/cloudsentinel-auditor
+    newName: cloudsentinel-auditor
+    newTag: local
+  - name: ghcr.io/adxmrxk/cloudsentinel-reporter
+    newName: cloudsentinel-reporter
+    newTag: local
+
+patches:
+  # Locally built images are loaded into the cluster, never pulled.
+  - target:
+      kind: Deployment
+      name: reporter
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: reporter-hpa
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+  - target:
+      kind: CronJob
+      name: cloudsentinel-audit
+    patch: |-
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent
+  - target:
+      kind: ConfigMap
+      name: cloudsentinel-config
+    patch: |-
+      - op: add
+        path: /data/DYNAMODB_ENDPOINT
+        value: http://dynamodb-local:8000
+      - op: add
+        path: /data/S3_ENDPOINT_URL
+        value: http://s3-local:5000
+  - target:
+      kind: Secret
+      name: cloudsentinel-secrets
+    patch: |-
+      - op: replace
+        path: /stringData/AWS_ACCESS_KEY_ID
+        value: local
+      - op: replace
+        path: /stringData/AWS_SECRET_ACCESS_KEY
+        value: local

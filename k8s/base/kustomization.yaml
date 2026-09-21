@@ -9,18 +9,19 @@ resources:
   - secret.yaml
   - serviceaccount.yaml
   - redis-deployment.yaml
-  - auditor-deployment.yaml
+  - postgres.yaml
   - reporter-deployment.yaml
   - ingress.yaml
   - hpa.yaml
   - cronjob.yaml
 
-commonLabels:
-  app.kubernetes.io/managed-by: kustomize
-  app.kubernetes.io/version: "1.0.0"
+labels:
+  - pairs:
+      app.kubernetes.io/managed-by: kustomize
+      app.kubernetes.io/version: "1.0.0"
 
 images:
-  - name: ghcr.io/cloudsentinel/auditor
+  - name: ghcr.io/adxmrxk/cloudsentinel-auditor
     newTag: latest
-  - name: ghcr.io/cloudsentinel/reporter
+  - name: ghcr.io/adxmrxk/cloudsentinel-reporter
     newTag: latest
